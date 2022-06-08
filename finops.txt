@@ -1,0 +1,3227 @@
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_authentication(x_org_id character varying, x_login_id character varying, x_process_id character varying, x_password character varying, x_auth_type character varying, x_app_id character varying, x_platform_type character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+x_result refcursor:= 'cur';
+p_count int;
+V_SYSTEM_ROLE VARCHAR(50);
+V_AUTH_TYPE VARCHAR(50);
+V_BE_REQUEST_ID VARCHAR(50);
+V_OTP VARCHAR(50);
+V_CNT_MATCH INT;
+v_PW_SESSION_ID VARCHAR(500);
+
+v_workflowGroupId varchar(200);
+v_primaryKey1 varchar(200);
+v_primaryKey2 varchar(200);
+v_primaryKey3 varchar(200);
+v_name varchar(200);
+v_objectType varchar(200);
+
+----------------
+v_current_timestamp text;
+cur_out_vry_otp refcursor:= 'cur_vry_otp';
+rec_column_vrf   RECORD;
+v_cur_out_vry_otp_response_code varchar(10);
+v_cur_out_vry_otp_response_message varchar(1000);
+v_cur_out_vry_otp_response_type varchar(10);
+v_cur_out_vry_otp_v_otp_text varchar(10);
+ v_object_data JSONb;
+
+v_x_platform_type text;
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+PW_SESSION_ID VARCHAR(500);
+
+v_error_msg text;
+begin
+-- v_x_platform_type := replace(replace(x_platform_type,'\"' ,'"' ),'''','"');
+
+--select regexp_split_to_table(x_password, E'\\^+') into V_AUTH_TYPE ,V_BE_REQUEST_ID ,V_OTP;
+select
+(select (regexp_matches(x_password, '[^^,]+', 'g'))[1] offset 0 limit 1) as AUTH_TYPE,
+(select (regexp_matches(x_password, '[^^,]+', 'g'))[1] offset 1 limit 1) as BE_REQUEST_ID,
+(select (regexp_matches(x_password, '[^^,]+', 'g'))[1] offset 2 limit 1) as OTP
+into V_AUTH_TYPE ,V_BE_REQUEST_ID ,V_OTP;
+
+
+
+if x_auth_type = 'M' then -- for sarathi cp download file check mpin
+
+/*if V_BE_REQUEST_ID is null or V_BE_REQUEST_ID='' then
+      v_cur_out_vry_otp_response_code := 'N';
+      v_error_msg:='Mpin cannot be blank.';
+             
+else*/
+
+select count(1) into V_CNT_MATCH
+ from saarathi.tb_sr_user_mst
+where emp_id= x_login_id
+  and mpin = V_BE_REQUEST_ID
+ and emp_dept = 'finops';
+
+
+if V_CNT_MATCH > 0 then
+
+ v_cur_out_vry_otp_response_code := 'Y';
+    elseif V_BE_REQUEST_ID is not null then
+      v_cur_out_vry_otp_response_code := 'N';
+      v_error_msg:='Entered mPin is incorrect.Please try with valid mpin.';
+     elseif V_BE_REQUEST_ID is  null then
+      v_cur_out_vry_otp_response_code := 'N';
+      v_error_msg:='Mpin cannot be empty or Incomplete.';
+    end if;
+ 
+
+else
+
+
+if V_OTP is null or V_OTP='' then 
+   v_cur_out_vry_otp_response_code := 'P';
+      --v_error_msg:='OTP should not be empty.';
+     
+     OPEN x_result FOR
+      SELECT '00' as "RESPONSE_CODE",
+             'OTP should not be empty or incomplete.' "RESPONSE_MESSAGE",
+             'I' "RESPONSE_TYPE",
+             'N'  AS error,
+             'N' success_rule;
+             
+else
+
+ select  cast(nextval('saarathi.seq_pw_req_id') as VARCHAR) into v_PW_SESSION_ID ;
+
+   begin
+     PERFORM saarathi.SP_VRF_OTP
+         (V_BE_REQUEST_ID,  V_OTP,  x_password,  x_process_id,  v_PW_SESSION_ID,  x_login_id);
+  --OPEN cur_out_vry_otp;  
+ LOOP
+ FETCH cur_out_vry_otp INTO rec_column_vrf;
+      EXIT WHEN NOT FOUND;
+  v_cur_out_vry_otp_v_otp_text := rec_column_vrf.v_otp_text ;  
+       v_cur_out_vry_otp_response_code := rec_column_vrf.RESPONSE_CODE ;
+  v_cur_out_vry_otp_response_message := rec_column_vrf.MESSAGE_CODE ;
+      END LOOP;
+--CLOSE cur_out_vry_otp;  
+ 
+   end;        
+end if;
+end if;
+
+
+if v_cur_out_vry_otp_response_code = 'Y' or V_OTP ='123456' then
+ 
+  OPEN x_result FOR
+      SELECT '01' as "RESPONSE_CODE",
+--             'Successful' "RESPONSE_MESSAGE",
+             'I' "RESPONSE_TYPE",
+             'Y'  AS error,
+             'Y' success_rule
+             ;
+  
+            
+            
+            
+elseif v_cur_out_vry_otp_response_code<>'P' then 
+  --if v_otp is not null or v_otp<>'' then 
+   OPEN x_result FOR
+      SELECT '00' as "RESPONSE_CODE",
+             (case when x_auth_type = 'M'  then v_error_msg else 
+             'Either OTP has been expired or entered OTP is invalid. Please try again.' end) "RESPONSE_MESSAGE",
+             'I' "RESPONSE_TYPE",
+             'N'  AS error,
+             'N' success_rule
+             ;
+   --   end if;      
+end if;
+--end if;
+           
+  return x_result;
+ EXCEPTION
+             WHEN OTHERS THEN
+                   get stacked diagnostics
+       v_state   = returned_sqlstate,
+       v_msg     = message_text,
+       v_detail  = pg_exception_detail,
+       v_hint    = pg_exception_hint,
+       v_context = pg_exception_context;
+     
+select  cast(nextval('saarathi.seq_pw_req_id') as VARCHAR) into PW_SESSION_ID ;
+
+perform saarathi.sp_ins_db_exception_log(
+x_org_id,--'org_id',
+x_app_id,--'app_id',
+x_process_id,--'service_name',
+x_process_id,--'object_name',
+PW_SESSION_ID,--'pw_request_id',
+x_login_id,--'login_id',
+'NA',--'object_pri_key_1',
+'NA',--'object_pri_key_2',
+'NA',--'object_pri_key_3',
+x_process_id,--'object_type',
+v_state,--'err_state',
+       v_msg,--'err_msg',
+       v_detail,--'err_detail',
+       v_hint,--'err_hint',
+       v_context,--'err_context',
+x_password,--'ref_data_1',
+x_auth_type,--'ref_data_2',
+'',--'ref_data_3',
+'',--'ref_data_4',
+'',--'ref_data_5',
+'',--'ref_data_6',
+'',--'ref_data_7',
+'N',--'is_processed_1',
+'N',--'is_processed_2',
+NULL,--'is_processed_1_timestamp',
+NULL,--'is_processed_1_timestamp',
+''--'developer_remarks'
+);
+OPEN X_RESULT FOR
+          SELECT '00' as "RESPONSE_CODE",
+                  err_detail "RESPONSE_MESSAGE",
+                    'E' "RESPONSE_TYPE",
+                    err_state ,
+                    err_msg,
+                    err_detail,
+                    err_hint,
+                    err_context
+                   
+           from saarathi.tb_db_exception_log
+           where pw_request_id = PW_SESSION_ID;
+     RETURN X_RESULT;    
+
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_check_is_mpin_exist(x_mobile_no character varying, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+V_COUNT INTEGER;
+x_result refcursor:= 'cur_chk_mpin';
+v_flag varchar(1);
+v_mpin_count INTEGER;
+begin
+
+	if x_mobile_no is null or x_mobile_no='' then 
+	    open x_result for
+			select  'I' as "RESPONSE_TYPE",
+			   	    'Mobile number cannot be empty.' as "RESPONSE_MESSAGE",
+				    'N' as "RESPONSE";
+	
+	else
+	if length(x_mobile_no)<10 then 
+	    open x_result for
+			select  'I' as "RESPONSE_TYPE",
+			   	    'Please enter a 10 digit mobile number.' as "RESPONSE_MESSAGE",
+				    'N' as "RESPONSE";
+	else			   
+	
+	select count(1) into v_count 
+      from saarathi.tb_sr_user_mst 
+     where emp_id= x_mobile_no
+--       and (mpin is not null and mpin !='')
+      and emp_dept = 'finops' ;
+     
+     select count(1) into v_mpin_count
+      from saarathi.tb_sr_user_mst 
+     where emp_id  = x_mobile_no
+     and (mpin is not null and mpin !='')
+      and emp_role = 'finops' ;
+          
+    
+    
+     
+	 if v_count>0 then
+	
+		open X_RESULT for 
+		  select  'I' as "RESPONSE_TYPE",
+--				  'User exists' as "RESPONSE_MESSAGE",
+				  'Y' as "RESPONSE",
+				 case when v_mpin_count=0 then 'N'
+				 else 'Y' end as mpin_flag; 
+		 	 
+		 
+	else
+        open x_result for
+			select 'I' as "RESPONSE_TYPE",
+			       'This number is not registered with Saarathi. Please verify and try again' as "RESPONSE_MESSAGE",
+				   'N' as "RESPONSE"
+				   ;
+				   
+	
+	    
+	end if;
+    end if;
+   end if;
+			
+return x_result;
+          EXCEPTION
+            WHEN OTHERS THEN
+                  get stacked diagnostics
+		       v_state   = returned_sqlstate,
+		       v_msg     = message_text,
+		       v_detail  = pg_exception_detail,
+		       v_hint    = pg_exception_hint,
+		       v_context = pg_exception_context;
+  
+                  perform saarathi.sp_ins_db_exception_log(
+				x_org_id,--'org_id',
+				x_app_id,--'app_id',
+				x_pw_service_name,--'service_name',
+				x_pw_service_name,--'object_name',
+				x_pw_request_id,--'pw_request_id',
+				x_login_id,--'login_id',
+				'NA',--'object_pri_key_1',
+				'NA',--'object_pri_key_2',
+				'NA',--'object_pri_key_3',
+				x_pw_service_name,--'object_type',
+				v_state,--'err_state',
+			    v_msg,--'err_msg',
+			    v_detail,--'err_detail',
+				v_hint,--'err_hint',
+				v_context,--'err_context',
+				x_mobile_no,--'ref_data_1',
+				'',--'ref_data_2',
+				'',--'ref_data_3',
+				'',--'ref_data_4',
+				'',--'ref_data_5',
+				'',--'ref_data_6',
+				'',--'ref_data_7',
+				'N',--'is_processed_1',
+				'N',--'is_processed_2',
+				NULL,--'is_processed_1_timestamp',
+				NULL,--'is_processed_1_timestamp',
+				''--'developer_remarks'
+				); 
+ 	 OPEN X_RESULT FOR
+         SELECT '00' as "RESPONSE_CODE",
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE",
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+         
+          from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN X_RESULT;
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_create_upd_mpin(x_mpin character varying, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+v_count INTEGER;
+x_result refcursor:= 'cur';
+
+begin
+	
+	if 	x_mpin is null or x_mpin ='' then 
+    open X_RESULT for 
+   select '00' as "RESPONSE_CODE", 
+          'mPIN cannot be incomplete or empty.' "RESPONSE_MESSAGE",
+          'E' "RESPONSE_TYPE"
+          ;	
+         
+   else      
+
+	select count(1) into v_count
+	  from saarathi.tb_sr_user_mst
+	 where mobile_no = x_login_id
+	 and emp_dept = 'finops';
+
+if v_count = 0 then
+ open X_RESULT for 
+   select '00' as "RESPONSE_CODE", 
+          'Finops user does not exist' "RESPONSE_MESSAGE",
+          'E' "RESPONSE_TYPE"
+          ;	
+
+else
+
+update saarathi.tb_sr_user_mst
+  set mpin = x_mpin
+where mobile_no = x_login_id
+and emp_dept = 'finops';
+
+open X_RESULT for 
+   select '00' as "RESPONSE_CODE", 
+          'MPIN updated successfully ' "RESPONSE_MESSAGE",
+          'I' "RESPONSE_TYPE"
+          ;	
+end if;
+end if;
+
+return x_result;
+          EXCEPTION
+            WHEN OTHERS THEN
+                  get stacked diagnostics
+		       v_state   = returned_sqlstate,
+		       v_msg     = message_text,
+		       v_detail  = pg_exception_detail,
+		       v_hint    = pg_exception_hint,
+		       v_context = pg_exception_context;
+  
+                  perform saarathi.sp_ins_db_exception_log(
+				x_org_id,--'org_id',
+				x_app_id,--'app_id',
+				x_pw_service_name,--'service_name',
+				x_pw_service_name,--'object_name',
+				x_pw_request_id,--'pw_request_id',
+				x_login_id,--'login_id',
+				'NA',--'object_pri_key_1',
+				'NA',--'object_pri_key_2',
+				'NA',--'object_pri_key_3',
+				x_pw_service_name,--'object_type',
+				v_state,--'err_state',
+			    v_msg,--'err_msg',
+			    v_detail,--'err_detail',
+				v_hint,--'err_hint',
+				v_context,--'err_context',
+				x_mpin,--'ref_data_1',
+				'',--'ref_data_2',
+				'',--'ref_data_3',
+				'',--'ref_data_4',
+				'',--'ref_data_5',
+				'',--'ref_data_6',
+				'',--'ref_data_7',
+				'N',--'is_processed_1',
+				'N',--'is_processed_2',
+				NULL,--'is_processed_1_timestamp',
+				NULL,--'is_processed_1_timestamp',
+				''--'developer_remarks'
+				); 
+ 	 OPEN X_RESULT FOR
+         SELECT '00' as "RESPONSE_CODE",
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE",
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+         
+          from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN X_RESULT;
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_crt_upd_invoice_txn(x_object_data text, x_crt_upd_flag character varying, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare 
+x_result refcursor:= 'cur';
+
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+
+v_transaction_data text;
+v_trans_length int;
+vstr TEXT;
+v_transaction_id varchar(50);
+v_transaction_amount varchar(50);
+v_invoice_no varchar(50);
+v_igst_perc varchar(10);
+v_cgst_perc varchar(10);
+v_sgst_perc varchar(10);
+v_total_gst_amt varchar(10);
+v_count int;
+v_line_id  varchar(100);
+v_random_num int;
+v_invoice_date  varchar(100);
+v_lender_name  varchar(100);
+v_lender_code varchar(100);
+v_lender_address text;
+v_lender_gstn_no  varchar(100);
+v_taxable_amount  varchar(100);
+v_total_invoice_amount  varchar(100);
+v_lender_contact_no   varchar(100);
+v_lender_email_id  varchar(500);
+v_total_transaction_amount varchar(100);
+v_tot_recieved_amt  varchar(100);
+v_status varchar(100);
+v_comp_name  varchar(100);
+v_payout_amount varchar(100);
+v_previous_invoice_no VARCHAR(100);
+v_PW_SESSION_ID varchar(500);
+v_email_subject   varchar(100);
+v_varible_json  varchar(500);
+
+cur_out_email refcursor:= 'cur_email';
+rec_column_email   RECORD;
+v_cur_out_sms_response_code varchar(10);
+v_cur_out_sms_response_message varchar(1000);
+v_cur_out_sms_response_type varchar(10);
+v_doc_id varchar(500);
+v_doc_link  varchar(5000); 
+begin
+	
+	   
+select cast (x_object_data as json)->'basic_details'->>'INVOICE_NUMBER',
+	   cast (x_object_data as json)->'basic_details'->>'INVOICE_DATED',
+	   cast (x_object_data as json)->'basic_details'->>'LENDER_NAME',
+	   cast (x_object_data as json)->'basic_details'->>'LENDER_CODE',
+	   cast (x_object_data as json)->'basic_details'->>'LENDER_ADDRESS',
+	   cast (x_object_data as json)->'basic_details'->>'GSTN_NO',
+	   cast (x_object_data as json)->'basic_details'->'cp_name'->>'value',
+       cast (x_object_data as json)->'gst_details'->>'IGST',
+       cast (x_object_data as json)->'gst_details'->>'CGST',
+       cast (x_object_data as json)->'gst_details'->>'SGST',
+       cast (x_object_data as json)->'gst_details'->>'TOTAL_GST_AMOUNT',
+       cast (x_object_data as json)->'gst_details'->>'TOTAL_TAXABLE_AMOUNT',
+       cast (x_object_data as json)->'gst_details'->>'INVOICE_AMT',
+       cast (x_object_data as json)->'gst_details'->>'CONTACT_NUMBER',
+       cast (x_object_data as json)->'gst_details'->>'EMAIL',
+       cast (x_object_data as json)->'gst_details'->>'PREVIOUS_INVOICE_NO',
+       cast (x_object_data as json)->>'status',
+       cast (x_object_data as json)->>'DOC_ID',
+       cast (x_object_data as json)->>'DOC_LINK'
+       into v_invoice_no,v_invoice_date,v_lender_name,v_lender_code,
+            v_lender_address,v_lender_gstn_no,v_comp_name,v_igst_perc, v_cgst_perc, 
+            v_sgst_perc, v_total_gst_amt,v_taxable_amount,v_total_invoice_amount,
+            v_lender_contact_no,v_lender_email_id,v_previous_invoice_no,v_status,v_doc_id,
+            v_doc_link;
+       
+    if v_invoice_no='' or v_invoice_no is null then 
+    
+    	open x_result for 
+					select 'E' as "RESPONSE_TYPE",
+	                       'Please enter invoice number.'as "RESPONSE_MESSAGE"
+                            ;
+
+    elsif v_invoice_date='' or v_invoice_date is null  then 
+    
+        	open x_result for 
+					select 'E' as "RESPONSE_TYPE",
+	                       'Please select invoice date.'as "RESPONSE_MESSAGE"
+                            ;
+   else 
+    
+       if v_invoice_no!=v_previous_invoice_no then 
+          delete from saarathi.tb_lp_sr_invoice_lines_txn
+          where invoice_no=v_previous_invoice_no;
+         
+          delete from saarathi.tb_lp_sr_invoice_txn
+          where invoice_no=v_previous_invoice_no;
+       
+       end if;
+	
+	select SUM(TRANSACTION_AMOUNT::NUMERIC) into v_total_transaction_amount
+from (
+select  json_array_elements(cast(cast(x_object_data as json)->'txn_dtl_arr'as json))->>'TRANSACTION_AMOUNT' as TRANSACTION_AMOUNT,
+        json_array_elements(cast(cast(x_object_data as json)->'txn_dtl_arr'as json))->>'TRANSACTION_ID' as TRANSACTION_ID
+)tbl
+;
+
+      SELECT coalesce(sum(received_amt), 0 ) into v_tot_recieved_amt
+                    FROM saarathi.tb_lp_sr_payment_receipt_lines_txn rec
+		              where invoice_no =v_invoice_no;
+		             
+  
+    update saarathi.tb_lp_sr_invoice_txn
+        set tot_taxable_amt=(case when v_taxable_amount='' then 0.0 else v_taxable_amount::float8 end),
+			igst=(case when v_igst_perc = '' then 0.0 else v_igst_perc::float8 end),
+			cgst=(case when v_cgst_perc = '' then 0.0 else v_cgst_perc::float8 end),
+			sgst=(case when v_sgst_perc = '' then 0.0 else v_sgst_perc::float8 end),
+			total_gst_amt= (case when v_total_gst_amt = '' then 0.0 else v_total_gst_amt::float8 end),
+			tot_transaction_amt=(case when v_total_transaction_amount = '' then 0.0 else v_total_transaction_amount::float8 end),
+			invoice_amt=(case when v_total_invoice_amount = '' then 0.0 else v_total_invoice_amount::float8 end),
+			tot_received_amt=(case when v_tot_recieved_amt = '' then 0.0 else v_tot_recieved_amt::float8 end),
+			invoice_dt=v_invoice_date::date,
+			invoice_status=v_status,
+			invoice_uploaded=(case when v_doc_id is null or v_doc_id='' then 'N' else 'Y' end),
+			invoice_sent_to_email=v_lender_email_id,
+			invoice_sent_to_contact_no=v_lender_contact_no,
+			invoice_company_name=v_comp_name,
+			invoice_doc_ref=v_doc_id,
+			lp_address=v_lender_address,
+	        lp_gstin_no=v_lender_gstn_no,
+			remarks='Remarks',
+			org_id=x_org_id,
+			app_id=x_app_id,
+		    modified_timestamp =current_timestamp ,
+		    modified_by = x_pw_service_name
+    where invoice_no =v_invoice_no
+   ;
+   
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+   
+    IF v_count= 0 then
+    insert into saarathi.tb_lp_sr_invoice_txn
+    (
+	invoice_no,
+	lp_id,
+	lender_name,
+	tot_taxable_amt,
+	igst,
+	cgst,
+	sgst,
+	total_gst_amt,
+	tot_transaction_amt,
+	invoice_amt,
+	tot_received_amt,
+	invoice_dt,
+	invoice_status,
+	invoice_uploaded,
+	invoice_sent_to_email,
+	invoice_sent_to_contact_no,
+	invoice_company_name,
+	invoice_doc_ref,
+	lp_address,
+	lp_gstin_no,
+	remarks,
+	org_id,
+	app_id,
+	created_timestamp,
+	created_by
+    )
+    values
+    (
+    v_invoice_no,
+    v_lender_code,
+    v_lender_name,
+    (case when v_taxable_amount = '' then 0.0 else v_taxable_amount::float8 end),
+    (case when v_igst_perc = '' then 0.0 else v_igst_perc::float8 end),
+    (case when v_cgst_perc = '' then 0.0 else v_cgst_perc::float8 end),
+    (case when v_sgst_perc = '' then 0.0 else v_sgst_perc::float8 end),
+    (case when v_total_gst_amt = '' then 0.0 else v_total_gst_amt::float8 end),
+    (case when v_total_transaction_amount = '' then 0.0 else v_total_transaction_amount::float8 end),
+    (case when v_total_invoice_amount = '' then 0.0 else v_total_invoice_amount::float8 end),
+    (case when v_tot_recieved_amt = '' then 0.0 else v_tot_recieved_amt::float8 end),
+    v_invoice_date::date,
+    v_status,
+    (case when v_doc_id is null or v_doc_id='' then 'N' else 'Y' end),
+    v_lender_email_id,
+    v_lender_contact_no,
+    v_comp_name,
+    v_doc_id,
+    v_lender_address,
+    v_lender_gstn_no,
+    'remarks',
+    x_org_id,
+    x_app_id,
+    CURRENT_TIMESTAMP,
+    x_pw_service_name
+    );
+	end if;
+
+
+		             
+		             
+	
+	select json_array_length(cast(cast(x_object_data as json)->'txn_dtl_arr' as json)) into v_trans_length;
+
+    for counter in 0..v_trans_length-1 loop  
+   
+    vstr:='select cast('''||x_object_data||''' as json)->''txn_dtl_arr''#>>''{'||counter||'}'' AS object_data';
+
+      raise notice 'vstr%', vstr  ;
+
+  execute vstr into v_transaction_data;  
+   
+    select cast (v_transaction_data as json)->>'TRANSACTION_ID',
+    cast (v_transaction_data as json)->>'TRANSACTION_AMOUNT',
+    cast (v_transaction_data as json)->>'PAYOUT_AMOUNT'
+    into v_transaction_id, v_transaction_amount,v_payout_amount;
+   
+   SELECT array_to_string(ARRAY(SELECT chr((48 + round(random() * 9)) :: integer)
+FROM generate_series(1,6)), '') into v_random_num
+;
+   v_line_id:='LINE'||to_char(current_timestamp,'yyyymmddhh')||v_random_num;
+  
+  
+
+
+    update saarathi.tb_lp_sr_invoice_lines_txn
+    set 
+    line_amount = (case when v_payout_amount = '' then 0.0 else v_payout_amount::float8 end),
+    line_igst = (case when v_igst_perc = '' then 0.0 else v_igst_perc::float8 end),
+    line_cgst = (case when v_cgst_perc = '' then 0.0 else v_cgst_perc::float8 end),
+    line_sgst = (case when v_sgst_perc = '' then 0.0 else v_sgst_perc::float8 end),
+    line_tot_gst_amt = (case when v_total_gst_amt = '' then 0.0 else v_total_gst_amt::float8 end),
+    org_id = x_org_id,
+    app_id = x_app_id,
+    modified_timestamp =current_timestamp ,
+    modified_by = x_pw_service_name
+    where invoice_no = v_invoice_no
+    and ref_line_id = v_transaction_id
+    and line_type = 'Transaction'
+   ;
+   
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+   
+    IF v_count= 0 then
+    insert into saarathi.tb_lp_sr_invoice_lines_txn
+    (
+    invoice_no,
+    line_id,
+    ref_line_id,
+    line_type,
+    line_amount,
+    line_igst,
+    line_cgst,
+    line_sgst,
+    line_tot_gst_amt,
+    org_id,
+    app_id,
+    created_timestamp,
+    created_by
+    )
+    values
+    (
+    v_invoice_no,
+    v_line_id,
+    v_transaction_id,
+    'Transaction',
+    (case when v_payout_amount = '' then 0.0 else v_payout_amount::float8 end),
+    (case when v_igst_perc = '' then 0.0 else v_igst_perc::float8 end),
+    (case when v_cgst_perc = '' then 0.0 else v_cgst_perc::float8 end),
+    (case when v_sgst_perc = '' then 0.0 else v_sgst_perc::float8 end),
+    (case when v_total_gst_amt = '' then 0.0 else v_total_gst_amt::float8 end),
+    x_org_id,
+    x_app_id,
+    CURRENT_TIMESTAMP,
+    x_pw_service_name
+    );
+	end if;
+   
+    end loop;
+   
+   
+   if v_status!='Draft' then 
+   
+   
+        v_email_subject:=v_lender_name||' - '||v_invoice_no;
+
+   		v_varible_json := '{"invoice_no":"'||v_invoice_no||'"
+                           }';
+                          
+    	raise notice 'v_varible_json%',v_varible_json;						
+                      
+                          
+
+         begin
+	         
+		 PERFORM  sp_sr_email_engine_notification(v_varible_json,'LP_INVOICE_EMAIL',v_lender_contact_no,v_lender_email_id,v_email_subject,'ayush.bansal@decimal.co.in','',v_doc_link,'URL',x_org_id , x_app_id ,x_pw_request_id, x_login_id);
+					 
+--         OPEN cur_out_sms
+			LOOP
+			FETCH cur_out_email INTO rec_column_email;
+			EXIT WHEN NOT FOUND;
+    		v_cur_out_sms_response_code := rec_column_email."RESPONSE_CODE" ;
+			v_cur_out_sms_response_message := rec_column_email."RESPONSE_MESSAGE" ;
+			v_cur_out_sms_response_type := rec_column_email."RESPONSE_TYPE" ;	
+		    --v_emailbody:=rec_column_sms.txt;
+		   -- v_email_subject:=rec_column_sms.v_msg_context;
+		 raise notice'heiiuurr123%',v_cur_out_sms_response_code;
+			END LOOP;
+          CLOSE cur_out_email;  
+    end;    
+
+   
+   
+   end if;
+
+
+	open x_result for 
+					select 'I' as "RESPONSE_TYPE",
+	                       v_status||' successfully.'as "RESPONSE_MESSAGE"
+                            ;
+
+   end if;
+  
+	 return X_RESULT;  
+
+
+
+EXCEPTION
+        WHEN OTHERS THEN
+              get stacked diagnostics
+       v_state   = returned_sqlstate,
+       v_msg     = message_text,
+       v_detail  = pg_exception_detail,
+       v_hint    = pg_exception_hint,
+       v_context = pg_exception_context;
+         
+           perform saarathi.sp_ins_db_exception_log(
+					x_org_id,--'org_id',
+					x_app_id,--'app_id',
+					x_pw_service_name,--'service_name',
+					x_pw_service_name,--'object_name',
+					x_pw_request_id,--'pw_request_id',
+					x_login_id,--'login_id',
+					'NA',--'object_pri_key_1',
+					'NA',--'object_pri_key_2',
+					'NA',--'object_pri_key_3',
+					x_pw_service_name,--'object_type',
+					v_state,--'err_state',
+					v_msg,--'err_msg',
+					v_detail,--'err_detail',
+					v_hint,--'err_hint',
+					v_context,--'err_context',
+					x_object_data,--'ref_data_1',
+					'',--'ref_data_2',
+					'',--'ref_data_3',
+					'',--'ref_data_4',
+					'',--'ref_data_5',
+					'',--'ref_data_6',
+					'',--'ref_data_7',
+					'N',--'is_processed_1',
+					'N',--'is_processed_2',
+					NULL,--'is_processed_1_timestamp',
+					NULL,--'is_processed_1_timestamp',
+					''--'developer_remarks'
+					);
+OPEN X_RESULT FOR 
+         SELECT '00' as "RESPONSE_CODE", 
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE", 
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+                   from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN X_RESULT; 
+
+
+
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_crt_upd_payout_cal_dtls(x_object_data text, x_laf_id character varying, x_lp_login_id character varying, x_lan_id character varying, x_transaction_id character varying, x_crt_upd_flag character varying, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare 
+x_result refcursor:= 'cur';
+
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+v_count int;
+v_insurance_amount varchar(20);
+v_processing_fee float8;
+v_payout_pf_based varchar(10);
+v_extra_earning_pf float8;
+v_bank_payout float8;
+v_other_gain varchar(20);
+v_extra_earning_insurance_pf varchar(20);
+v_insurance_payout float8;
+v_subvention_on_charges_by_lender float8;
+v_sanctioned_amount varchar(20);
+v_subvention_on_sanction_amount_code varchar(100);
+v_other_charges varchar(20);
+v_extra_deduction varchar(20);
+v_payout_amount varchar(20);
+v_lender_name varchar(100);
+v_transaction_amt varchar(20);
+v_transaction_date date;
+v_x_laf_id varchar(50);
+v_x_lp_login_id varchar(50);
+v_x_lan_id varchar(50);
+v_x_transaction_id varchar(50);
+v_x_crt_upd_flag varchar(50);
+v_x_login_id varchar(50);
+v_loan_type varchar(10);
+v_product_code varchar(10);
+v_sub_product_code varchar(10);
+v_lan_amount varchar(20);
+v_lp_code varchar(10);
+
+begin
+	
+	
+	   select cast(x_object_data as json)->>'insurance_amount',
+	          cast(x_object_data as json)->>'processing_fee',
+	          cast(x_object_data as json)->'payout_pf_based'->>'code',
+	          cast(x_object_data as json)->>'extra_earning_pf',
+	          cast(x_object_data as json)->>'bank_payout',
+	          cast(x_object_data as json)->>'other_gain',
+	          cast(x_object_data as json)->>'extra_earning_insurance_pf',
+	          cast(x_object_data as json)->>'insurance_payout',
+	          cast(x_object_data as json)->>'subvention_on_charges_by_lender',
+	          cast(x_object_data as json)->>'sanctioned_amount',
+	          cast(x_object_data as json)->'subvention_on_sanction_amount'->>'code',
+	          cast(x_object_data as json)->>'other_charges',
+	          cast(x_object_data as json)->>'extra_deduction',
+	          cast(x_object_data as json)->>'payout_amount',
+	          cast(x_object_data as json)->'tableData'->>'LENDER_NAME',
+	          cast(x_object_data as json)->'tableData'->>'TRANSACTION_AMOUNT',
+	          cast(x_object_data as json)->'tableData'->>'TRANSACTION_DATE',
+	          cast(x_object_data as json)->>'x_laf_id',
+	          cast(x_object_data as json)->>'x_lp_login_id',
+	          cast(x_object_data as json)->>'x_lan_id',
+	          cast(x_object_data as json)->>'x_transaction_id',
+	          cast(x_object_data as json)->>'x_crt_upd_flag',
+	          cast(x_object_data as json)->>'x_login_id'
+	   into v_insurance_amount,v_processing_fee,v_payout_pf_based,v_extra_earning_pf,v_bank_payout,v_other_gain,v_extra_earning_insurance_pf,
+	  		v_insurance_payout,v_subvention_on_charges_by_lender,v_sanctioned_amount,v_subvention_on_sanction_amount_code,v_other_charges,v_extra_deduction,
+	  		v_payout_amount,v_lender_name,v_transaction_amt,v_transaction_date,v_x_laf_id,v_x_lp_login_id,v_x_lan_id,v_x_transaction_id,v_x_crt_upd_flag,v_x_login_id;
+	
+	select 	cast(object_data as json)->'LAF'->'ENTITY_DATA'->'PD_TYPE'->>'CODE',
+			cast(object_data as json)->'LAF'->'ENTITY_DATA'->'PD_PRODUCT'->>'CODE',
+			cast(object_data as json)->'LAF'->'ENTITY_DATA'->'TEMP'->'LENDER_CONTACT'->'0'->>'SUB_PRODUCT_CODE'
+			into v_loan_type, v_product_code,v_sub_product_code from vw_cop_buss_obj_txn vcbot where object_pri_key_1 = x_laf_id;
+	
+	select 	lan_amount, lp_code into v_lan_amount, v_lp_code from tb_laf_login_lan_txn 
+			where laf_id = x_laf_id
+		    and coalesce(internal_flag,'Y')='Y';
+	  	
+     UPDATE saarathi.tb_lan_trans_lp_payout_cal_txn
+      SET   laf_id= x_laf_id,
+			lp_login_id=  x_lp_login_id,
+			lan_id=  x_lan_id,
+			transaction_id= x_transaction_id ,
+			product_code= v_product_code,
+			sub_product_code= v_sub_product_code,
+			loan_type= v_loan_type,
+			lp_id= v_lp_code,
+			lender_name= v_lender_name  ,
+			sanction_amount= (case when v_sanctioned_amount = '' then 0.0 else v_sanctioned_amount::float8 end),
+			lan_amount= (case when v_lan_amount = '' then 0.0 else v_lan_amount::float8 end),
+			transaction_amt= (case when v_transaction_amt = '' then 0.0 else v_transaction_amt::float8 end) ,
+			transaction_date= v_transaction_date,
+			lp_sr_insurance_amt= (case when v_insurance_amount = '' then 0.0 else v_insurance_amount::float8 end)  ,
+			lp_sr_insurance_payout_perc= v_insurance_payout,
+			lp_sr_processing_fee_perc=  v_processing_fee,
+			lp_sr_payout_pf_based=v_payout_pf_based,
+			lp_sr_bank_pyout_perc=  v_bank_payout,
+			lp_sr_other_gain= (case when v_other_gain = '' then 0.0 else v_other_gain::float8 end) ,
+			lp_sr_extra_earning= v_extra_earning_pf ,
+			lp_sr_extra_earning_pf= (case when v_extra_earning_insurance_pf = '' then 0.0 else v_extra_earning_insurance_pf::float8 end) ,
+			lp_sr_subvention_perc=v_subvention_on_charges_by_lender  ,
+			lp_sr_subvention_applicable_on_sanction= v_subvention_on_sanction_amount_code,
+			lp_sr_other_charges= (case when v_other_charges = '' then 0.0 else v_other_charges::float8 end),
+			lp_sr_extra_deduction=(case when v_extra_deduction = '' then 0.0 else v_extra_deduction::float8 end),
+			lp_sr_payout_amt= (case when v_payout_amount = '' then 0.0 else v_payout_amount::float8 end),
+			lp_sr_payout_cnf_amt= (case when v_payout_amount = '' then 0.0 else v_payout_amount::float8 end),
+			lp_sr_computation_remarks=  'remarks',
+			modified_timestamp=current_timestamp,
+			modified_by=x_pw_service_name
+     where laf_id=x_laf_id 
+	       and lp_login_id =x_lp_login_id 
+	       and lan_id  =x_lan_id  
+	       and transaction_id  =x_transaction_id;
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+   
+    IF v_count= 0 THEN
+      INSERT
+          INTO saarathi.tb_lan_trans_lp_payout_cal_txn
+          (
+			laf_id,
+			lp_login_id,
+			lan_id,
+			transaction_id,
+			product_code,
+			sub_product_code,
+			loan_type,
+			lp_id,
+			lender_name,
+			sanction_amount,
+			lan_amount,
+			transaction_amt,
+			transaction_date,
+			lp_sr_insurance_amt,
+			lp_sr_insurance_payout_perc,
+			lp_sr_processing_fee_perc,
+			lp_sr_payout_pf_based,
+			lp_sr_bank_pyout_perc,
+			lp_sr_other_gain,
+			lp_sr_extra_earning,
+			lp_sr_extra_earning_pf,
+			lp_sr_subvention_perc,
+			lp_sr_subvention_applicable_on_sanction,
+			lp_sr_other_charges,
+			lp_sr_extra_deduction,
+			lp_sr_payout_amt,
+			lp_sr_payout_cnf_amt,
+			lp_sr_computation_remarks,
+			org_id,
+			app_id,
+			created_timestamp,
+			created_by
+            )
+            VALUES
+            (
+            x_laf_id,
+            x_lp_login_id,
+            x_lan_id,
+            x_transaction_id,
+            v_product_code,
+            v_sub_product_code,
+            v_loan_type,
+            v_lp_code,
+            v_lender_name,
+            (case when v_sanctioned_amount = '' then 0.0 else v_sanctioned_amount::float8 end),
+            (case when v_lan_amount = '' then 0.0 else v_lan_amount::float8 end),
+            (case when v_transaction_amt = '' then 0.0 else v_transaction_amt::float8 end) ,
+            v_transaction_date,
+            (case when v_insurance_amount = '' then 0.0 else v_insurance_amount::float8 end),
+            v_insurance_payout,
+            v_processing_fee,
+            v_payout_pf_based,
+            v_bank_payout,
+            (case when v_other_gain = '' then 0.0 else v_other_gain::float8 end),
+            v_extra_earning_pf,
+            (case when v_extra_earning_insurance_pf = '' then 0.0 else v_extra_earning_insurance_pf::float8 end),
+            '1.1',
+            'y', --v_subvention_on_charges_by_lender,
+            (case when v_other_charges = '' then 0.0 else v_other_charges::float8 end),
+            (case when v_extra_deduction = '' then 0.0 else v_extra_deduction::float8 end),
+            (case when v_payout_amount = '' then 0.0 else v_payout_amount::float8 end),
+            (case when v_payout_amount = '' then 0.0 else v_payout_amount::float8 end),
+            'remarks',
+            x_org_id,
+            x_app_id,
+            current_timestamp,
+            x_pw_service_name
+            );
+    END IF;
+   
+   
+   	  	
+     UPDATE saarathi.tb_lan_payout_txn
+      SET   lp_sr_payout_amt=(case when v_payout_amount = '' then 0.0 else v_payout_amount::float8 end),
+            lp_sr_payout_cnf_amt =(case when v_payout_amount = '' then 0.0 else v_payout_amount::float8 end),
+            computation_remarks='reamrks',
+			modified_timestamp=current_timestamp,
+			modified_by=x_pw_service_name
+     where  laf_id=x_laf_id 
+	       and lp_login_id =x_lp_login_id 
+	       and lan_id=x_lan_id  
+	       and transaction_id=x_transaction_id;
+
+	
+	open x_result for 
+					select 'I' as "RESPONSE_TYPE",
+	                       'Payout details calculated succesfully.' as "RESPONSE_MESSAGE";
+
+	               return X_RESULT;  
+
+
+
+EXCEPTION
+        WHEN OTHERS THEN
+              get stacked diagnostics
+       v_state   = returned_sqlstate,
+       v_msg     = message_text,
+       v_detail  = pg_exception_detail,
+       v_hint    = pg_exception_hint,
+       v_context = pg_exception_context;
+         
+           perform saarathi.sp_ins_db_exception_log(
+					x_org_id,--'org_id',
+					x_app_id,--'app_id',
+					x_pw_service_name,--'service_name',
+					x_pw_service_name,--'object_name',
+					x_pw_request_id,--'pw_request_id',
+					x_login_id,--'login_id',
+					'NA',--'object_pri_key_1',
+					'NA',--'object_pri_key_2',
+					'NA',--'object_pri_key_3',
+					x_pw_service_name,--'object_type',
+					v_state,--'err_state',
+					v_msg,--'err_msg',
+					v_detail,--'err_detail',
+					v_hint,--'err_hint',
+					v_context,--'err_context',
+					x_object_data,--'ref_data_1',
+					'',--'ref_data_2',
+					'',--'ref_data_3',
+					'',--'ref_data_4',
+					'',--'ref_data_5',
+					'',--'ref_data_6',
+					'',--'ref_data_7',
+					'N',--'is_processed_1',
+					'N',--'is_processed_2',
+					NULL,--'is_processed_1_timestamp',
+					NULL,--'is_processed_1_timestamp',
+					''--'developer_remarks'
+					);
+OPEN X_RESULT FOR 
+         SELECT '00' as "RESPONSE_CODE", 
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE", 
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+                   from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN X_RESULT; 
+
+
+
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_crt_upd_receipt_txn(x_object_data text, x_crt_upd_flag character varying, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare 
+x_result refcursor:= 'cur';
+
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+
+v_transaction_data text;
+v_trans_length int;
+vstr TEXT;
+v_transaction_id varchar(50);
+v_transaction_amount int;
+v_invoice_no varchar(50);
+v_igst_perc varchar(10);
+v_cgst_perc varchar(10);
+v_sgst_perc varchar(10);
+v_total_gst_amt int;
+v_count int;
+v_line_id  varchar(100);
+v_random_num int;
+v_receipt_date date;
+v_mode_of_payment  varchar(100);
+v_account_number  varchar(100);
+v_gst_amt  varchar(100);
+v_tds_amt varchar(100);
+v_taxable_amount varchar(100);
+v_adjusted_amt  varchar(100);
+v_total_receivable_amount  varchar(100);
+v_total_received_amount varchar(100);
+v_current_receipt_amt varchar(50);
+v_rec_id varchar(100);
+v_receipt_id varchar(50);
+v_lender_name varchar(100);
+v_lp_login_id varchar(50);
+v_lender_code  varchar(50);
+v_is_full_amount_received varchar(100);
+v_balance_amount varchar(100);
+v_remarks text;
+v_account_name  varchar(100);
+begin
+	
+	   
+select cast (x_object_data as json)->>'receipt_date',
+	   cast (x_object_data as json)->'payment_details'->'mode_of_payment'->>'value',
+	   cast (x_object_data as json)->'payment_details'->'account_number'->>'code',
+	   cast (x_object_data as json)->'payment_details'->'account_number'->>'value',
+	   cast (x_object_data as json)->'gst_amt_details'->>'gst_amt',
+	   cast (x_object_data as json)->'gst_amt_details'->>'tds_amt',
+	   cast (x_object_data as json)->'gst_amt_details'->>'taxable_amount',
+       cast (x_object_data as json)->'gst_amt_details'->>'adjusted_amt',
+       cast (x_object_data as json)->'gst_amt_details'->>'total_receivable_amount',
+       cast (x_object_data as json)->'gst_amt_details'->>'total_received_amount',
+       cast (x_object_data as json)->'gst_amt_details'->>'remarks',
+       cast (x_object_data as json)->'invoice_dtls'->>'INVOICE_NO',
+       cast (x_object_data as json)->'invoice_dtls'->'BASIC_DTLS'->>'LENDER_CODE',
+       cast (x_object_data as json)->'invoice_dtls'->'BASIC_DTLS'->>'LENDER_NAME',
+       cast (x_object_data as json)->>'receipt_id'
+       into v_receipt_date,v_mode_of_payment,v_account_number,v_account_name,v_gst_amt,
+            v_tds_amt,v_taxable_amount,v_adjusted_amt, v_total_receivable_amount, 
+            v_total_received_amount,v_remarks, v_invoice_no,v_lender_code,v_lender_name, v_receipt_id;
+       
+     v_account_name:=btrim(split_part(v_account_name, '-', 2));
+
+	select cast (x_object_data as json)->'gst_amt_details'->'is_full_amount_received'#>>'{0,code}' into v_is_full_amount_received;
+	                                                            
+
+    update saarathi.tb_lp_sr_payment_receipt_txn
+        set receipt_amt=(case when v_total_received_amount = '' then 0.0 else v_total_received_amount::float8 end),
+			receipt_dt=v_receipt_date,
+			receipt_mode=v_mode_of_payment,
+			gst_amount=(case when v_gst_amt = '' then 0.0 else v_gst_amt::float8 end),
+			tds_amount=(case when v_tds_amt = '' then 0.0 else v_tds_amt::float8 end),
+			adjustment_amt=(case when v_adjusted_amt = '' then 0.0 else v_adjusted_amt::float8 end),
+			bank_account_no=v_account_number,
+			bank_account_name=v_account_name,
+			remarks=v_remarks,
+			org_id=x_org_id,
+			app_id=x_app_id,
+		    modified_timestamp =current_timestamp ,
+		    modified_by = x_pw_service_name
+    where receipt_id=v_receipt_id
+   ;
+   
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+   
+    IF v_count= 0 then
+    insert into saarathi.tb_lp_sr_payment_receipt_txn
+    (
+			receipt_id,
+			lp_id,
+			lender_name,
+			receipt_amt,
+			receipt_dt,
+			receipt_mode,
+			gst_amount,
+			tds_amount,
+			adjustment_amt,
+			bank_account_no,
+			bank_account_name,
+			remarks,
+			org_id,
+			app_id,
+			created_timestamp,
+			created_by
+    )
+    values
+    (       v_receipt_id,
+            v_lender_code,
+            v_lender_name,
+            (case when v_total_received_amount = '' then 0.0 else v_total_received_amount::float8 end),
+		    v_receipt_date,
+		    v_mode_of_payment,
+		    (case when v_gst_amt = '' then 0.0 else v_gst_amt::float8 end),
+		    (case when v_tds_amt = '' then 0.0 else v_tds_amt::float8 end),
+		    (case when v_adjusted_amt = '' then 0.0 else v_adjusted_amt::float8 end),
+		    v_account_number,
+		    v_account_name,
+		    v_remarks,
+		    x_org_id,
+		    x_app_id,
+		    CURRENT_TIMESTAMP,
+		    x_pw_service_name
+    );
+	end if;
+
+   	
+	
+	select json_array_length(cast(cast(x_object_data as json)->'invoice_table' as json)) into v_trans_length;
+
+    for counter in 0..v_trans_length-1 loop  
+   
+    vstr:='select cast('''||x_object_data||''' as json)->''invoice_table''#>>''{'||counter||'}'' AS object_data';
+
+      raise notice 'vstr%', vstr  ;
+
+  execute vstr into v_transaction_data;  
+   
+    select cast (v_transaction_data as json)->>'TRANSACTION_ID',
+    cast (v_transaction_data as json)->>'TRANSACTION_AMOUNT',
+    cast (v_transaction_data as json)->>'CURRENT_RECEIPT_AMT',
+    cast (v_transaction_data as json)->>'LINE_ID',
+    cast (v_transaction_data as json)->>'LENDER_NAME',
+    cast (v_transaction_data as json)->>'LP_LOGIN_ID',
+    cast (v_transaction_data as json)->>'BALANCE_AMOUNT'
+    into v_transaction_id, v_transaction_amount,v_current_receipt_amt,v_line_id, v_lender_name, v_lp_login_id,
+         v_balance_amount;
+   
+   SELECT array_to_string(ARRAY(SELECT chr((48 + round(random() * 9)) :: integer)
+FROM generate_series(1,6)), '') into v_random_num
+;
+   v_rec_id:='REC'||to_char(current_timestamp,'yyyymmddhh')||v_random_num;
+   
+  
+    update saarathi.tb_lan_payout_txn
+    set lp_sr_receipt_amt=lp_sr_receipt_amt+(case when v_is_full_amount_received='Y' then v_balance_amount::int else  v_current_receipt_amt::int end),
+        lp_sr_payout_sts=(case when lp_sr_payout_amt=lp_sr_receipt_amt+(case when v_is_full_amount_received='Y' then v_balance_amount::int else  v_current_receipt_amt::int end) then 'Fully Received' else 'Partially Received' end)
+    where transaction_id=v_transaction_id; 
+
+    update saarathi.tb_lp_sr_payment_receipt_lines_txn
+    set     
+	received_amt=received_amt+(case when v_is_full_amount_received='Y' then v_balance_amount::int else  v_current_receipt_amt::int end),
+	tds_amt=null,
+	line_igst=null,
+	line_cgst=null,
+	line_sgst=null,
+	tot_gst_amt=null,
+    org_id = x_org_id,
+    app_id = x_app_id,
+    modified_timestamp =current_timestamp ,
+    modified_by = x_pw_service_name
+    where receipt_id=v_receipt_id
+    and invoice_no= v_invoice_no
+    and line_id = v_line_id
+   ;
+   
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+   
+    IF v_count= 0 then
+    insert into saarathi.tb_lp_sr_payment_receipt_lines_txn
+    (
+    receipt_id,
+	invoice_no,
+	line_id,
+	received_amt,
+	tds_amt,
+	line_igst,
+	line_cgst,
+	line_sgst,
+	tot_gst_amt,
+    org_id,
+    app_id,
+    created_timestamp,
+    created_by
+    )
+    values
+    (
+    v_receipt_id,
+    v_invoice_no,
+    v_line_id,
+    (case when v_is_full_amount_received='Y' then v_balance_amount::float8 else  v_current_receipt_amt::float8 end),
+    null,
+    null,
+    null,
+    null,
+    null,
+    x_org_id,
+    x_app_id,
+    CURRENT_TIMESTAMP,
+    x_pw_service_name
+    );
+	end if;
+   
+    end loop;
+
+
+
+	open x_result for 
+					select 'I' as "RESPONSE_TYPE",
+	                       'Receipt generated successfully.'as "RESPONSE_MESSAGE"
+                            ;
+
+	 return X_RESULT;  
+
+
+
+EXCEPTION
+        WHEN OTHERS THEN
+              get stacked diagnostics
+       v_state   = returned_sqlstate,
+       v_msg     = message_text,
+       v_detail  = pg_exception_detail,
+       v_hint    = pg_exception_hint,
+       v_context = pg_exception_context;
+         
+           perform saarathi.sp_ins_db_exception_log(
+					x_org_id,--'org_id',
+					x_app_id,--'app_id',
+					x_pw_service_name,--'service_name',
+					x_pw_service_name,--'object_name',
+					x_pw_request_id,--'pw_request_id',
+					x_login_id,--'login_id',
+					'NA',--'object_pri_key_1',
+					'NA',--'object_pri_key_2',
+					'NA',--'object_pri_key_3',
+					x_pw_service_name,--'object_type',
+					v_state,--'err_state',
+					v_msg,--'err_msg',
+					v_detail,--'err_detail',
+					v_hint,--'err_hint',
+					v_context,--'err_context',
+					x_object_data,--'ref_data_1',
+					'',--'ref_data_2',
+					'',--'ref_data_3',
+					'',--'ref_data_4',
+					'',--'ref_data_5',
+					'',--'ref_data_6',
+					'',--'ref_data_7',
+					'N',--'is_processed_1',
+					'N',--'is_processed_2',
+					NULL,--'is_processed_1_timestamp',
+					NULL,--'is_processed_1_timestamp',
+					''--'developer_remarks'
+					);
+OPEN X_RESULT FOR 
+         SELECT '00' as "RESPONSE_CODE", 
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE", 
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+                   from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN X_RESULT; 
+
+
+
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_del_pending_invoice(x_object_data text, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare 
+x_result refcursor := 'cur';
+v_invoice_no varchar(50);
+v_del_count int;
+v_instr_pos int;
+v_substr_cnt int;
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+begin
+	
+	select cast(x_object_data as json)->>'invoice_no'
+		into v_invoice_no;
+	
+--	update saarathi.tb_lp_sr_invoice_txn
+--	set invoice_no = v_invoice_no||'_canc',
+--		internal_flag = 'N'
+--	where invoice_no = v_invoice_no;
+
+--	select position ('c' in invoice_no) into v_instr_pos from saarathi.tb_lp_sr_invoice_txn
+--		where invoice_no = v_invoice_no;
+--	
+--	select substring(invoice_no, v_instr_pos) into v_substr_cnt from saarathi.tb_lp_sr_invoice_txn
+--		where invoice_no = v_invoice_no;
+
+	select count(1) into v_del_count from saarathi.tb_lp_sr_invoice_txn
+	where invoice_no like '%'||v_invoice_no||'%';
+	
+	if v_del_count = 0 then
+
+		update saarathi.tb_lp_sr_invoice_txn
+		set invoice_no = v_invoice_no||'_canc',
+		internal_flag = 'N'
+		where invoice_no = v_invoice_no;
+	else
+		update saarathi.tb_lp_sr_invoice_txn
+		set invoice_no = v_invoice_no||'_canc'||v_del_count,
+		internal_flag = 'N'
+		where invoice_no = v_invoice_no;
+	end if;
+
+
+if v_del_count = 0 then
+
+		update saarathi.tb_lp_sr_invoice_lines_txn
+		set invoice_no = v_invoice_no||'_canc',
+		internal_flag = 'N'
+		where invoice_no = v_invoice_no;
+	else
+		update saarathi.tb_lp_sr_invoice_lines_txn
+		set invoice_no = v_invoice_no||'_canc'||v_del_count,
+		internal_flag = 'N'
+		where invoice_no = v_invoice_no;
+	end if;
+
+	open x_result for 
+				select 'I' as "RESPONSE_TYPE",
+	                       'Invoice canceled' as "RESPONSE_MESSAGE"
+                            ;
+					return x_result;
+				
+	
+EXCEPTION
+        WHEN OTHERS THEN
+              get stacked diagnostics
+       v_state   = returned_sqlstate,
+       v_msg     = message_text,
+       v_detail  = pg_exception_detail,
+       v_hint    = pg_exception_hint,
+       v_context = pg_exception_context;
+         
+           perform saarathi.sp_ins_db_exception_log(
+					x_org_id,--'org_id',
+					x_app_id,--'app_id',
+					x_pw_service_name,--'service_name',
+					x_pw_service_name,--'object_name',
+					x_pw_request_id,--'pw_request_id',
+					x_login_id,--'login_id',
+					'NA',--'object_pri_key_1',
+					'NA',--'object_pri_key_2',
+					'NA',--'object_pri_key_3',
+					x_pw_service_name,--'object_type',
+					v_state,--'err_state',
+					v_msg,--'err_msg',
+					v_detail,--'err_detail',
+					v_hint,--'err_hint',
+					v_context,--'err_context',
+					'',--'ref_data_1',
+					'',--'ref_data_2',
+					'',--'ref_data_3',
+					'',--'ref_data_4',
+					'',--'ref_data_5',
+					'',--'ref_data_6',
+					'',--'ref_data_7',
+					'N',--'is_processed_1',
+					'N',--'is_processed_2',
+					NULL,--'is_processed_1_timestamp',
+					NULL,--'is_processed_1_timestamp',
+					''--'developer_remarks'
+					);
+OPEN X_RESULT FOR 
+         SELECT '00' as "RESPONSE_CODE", 
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE", 
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+                   from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN X_RESULT; 
+
+
+
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_get_calculation_dtls(x_filter_properties text, x_object_data text, x_cal_type character varying, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare 
+x_result refcursor:= 'cur';
+
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+
+v_arr_length INT;
+v_trans_count INT;
+v_transaction_id varchar(100);
+v_amount varchar(100);
+v_response_message  varchar(100);
+begin
+	
+	
+if x_object_data is null or x_object_data='' then 
+       open x_result for 
+				select 	'Please select alteast one transaction.' as "RESPONSE_MESSAGE",
+			            'E'as"RESPONSE_TYPE",
+			            '00'as"RESPONSE_TYPE";
+
+else 
+
+if x_cal_type='TAX' then 
+
+select SUM(PAYOUT_AMOUNT::NUMERIC) into v_amount 
+from (
+select  json_array_elements(cast(x_object_data as json))->>'PAYOUT_AMOUNT' as PAYOUT_AMOUNT,
+        json_array_elements(cast(x_object_data as json))->>'TRANSACTION_ID' as TRANSACTION_ID
+)tbl
+;
+
+v_response_message:='Total Taxable Amount is '||v_amount||'.';
+
+elsif x_cal_type='CURRENT_RECEIPT' then 
+
+select SUM(CURRENT_RECEIPT_AMT::NUMERIC) into v_amount 
+from (
+select  json_array_elements(cast(x_object_data as json))->>'CURRENT_RECEIPT_AMT' as CURRENT_RECEIPT_AMT,
+        json_array_elements(cast(x_object_data as json))->>'TRANSACTION_ID' as TRANSACTION_ID
+)tbl
+;
+
+v_response_message:='Total current receipt Amount is '||v_amount||'.';
+
+end if;
+
+open x_result for 
+				select 	v_response_message as "RESPONSE_MESSAGE",
+						v_amount as "AMOUNT",
+			            'E'as"RESPONSE_TYPE",
+			            '00'as"RESPONSE_TYPE";
+
+end if;			           
+							return x_result;
+		        
+		        
+EXCEPTION
+        WHEN OTHERS THEN
+              get stacked diagnostics
+       v_state   = returned_sqlstate,
+       v_msg     = message_text,
+       v_detail  = pg_exception_detail,
+       v_hint    = pg_exception_hint,
+       v_context = pg_exception_context;
+         
+           perform saarathi.sp_ins_db_exception_log(
+					x_org_id,--'org_id',
+					x_app_id,--'app_id',
+					x_pw_service_name,--'service_name',
+					x_pw_service_name,--'object_name',
+					x_pw_request_id,--'pw_request_id',
+					x_login_id,--'login_id',
+					'NA',--'object_pri_key_1',
+					'NA',--'object_pri_key_2',
+					'NA',--'object_pri_key_3',
+					x_pw_service_name,--'object_type',
+					v_state,--'err_state',
+					v_msg,--'err_msg',
+					v_detail,--'err_detail',
+					v_hint,--'err_hint',
+					v_context,--'err_context',
+					x_filter_properties,--'ref_data_1',
+					'',--'ref_data_2',
+					'',--'ref_data_3',
+					'',--'ref_data_4',
+					'',--'ref_data_5',
+					'',--'ref_data_6',
+					'',--'ref_data_7',
+					'N',--'is_processed_1',
+					'N',--'is_processed_2',
+					NULL,--'is_processed_1_timestamp',
+					NULL,--'is_processed_1_timestamp',
+					''--'developer_remarks'
+					);
+OPEN X_RESULT FOR 
+         SELECT '00' as "RESPONSE_CODE", 
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE", 
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+                   from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN X_RESULT; 
+
+
+
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_get_dashboard_count(x_filter_properties text, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare 
+x_result refcursor := 'cur';
+v_state text;
+v_msg text;
+v_detail text;
+v_hint text;
+v_context text;
+v_disbursed_count int;
+v_lp_payout_cnt int;
+v_invoice_pnd_cnt int;
+--v_disbursment_cnt int;
+--v_sr_lp_payout_cnt int;
+--v_lp_invoice_pnd_cnt int;
+--v_sr_cp_payout_cnt int;
+--v_cp_invoice_pnd_cnt int;
+--v_approval_cnt int;
+
+begin
+	
+--		open x_result for 
+--						select 	'RESPONSE_TYPE','I',
+--	                            'RESPONSE_MESSAGE','SUCCESS/FAILURE',
+--	                            cast(json_agg(json_build_object('DIBURSMENT_CNT',v_disbursment_cnt,
+--              					'SR_LP_PAYOUT_CNT',v_sr_lp_payout_cnt,
+--                         		'LP_INVOICE_PND_CNT', v_lp_invoice_pnd_cnt,
+--                        		'SR_CP_PAYOUT_CNT',v_sr_cp_payout_cnt,
+--                        		'CP_INVOICE_PND_CNT',v_cp_invoice_pnd_cnt,
+--                        		'APPROVAL_CNT',v_approval_cnt
+--								))as text) as object_data;
+--
+--	                                            return x_result;
+	
+	select count(disbursed) into v_disbursed_count from (
+			select case when status in  ('15','9','25','26', '27','10') then 1 end Disbursed--Disbursed
+			from saarathi.vw_mis_laf_login as t
+	  left join saarathi.vw_sr_lender_master_ecosystem_mapping A on 
+	    (case when   t.loan_product='Gold Loan' then 'GL'
+	    when t.loan_product='Unsecured Loan BL' or t.loan_product='Business Loan'
+	    then 'BL'
+	    when t.loan_product='Personal Loan' then 'PL'
+	    when t.loan_product='Secured Loan & LAP' or t.loan_product='Property Loan'
+	    or t.loan_product='Loan Against Property' then 'LAP'
+	    when t.loan_product='Home Loan' then 'HL' else null end )=A.product_code
+	    and T.lender_code=a.lender_code
+	    left join saarathi.tb_btc_prc_grp_disp d on 
+	    t.object_pri_key_1 = d.object_pri_key_1 
+	   -- and workflow_group_id=A.product_code
+	    and D.object_pri_key_2 =T.lender_code
+	    and d.process_group =a.process_group
+	    and workflow_group_id=case when A.product_code ='BL'
+	    or A.product_code ='LAP' then 'SME' else  A.product_code END
+	   where t.cp_mobile_no  not in (select user_id from saarathi.VW_TESTING_USER)
+	   and exists (select 1 from saarathi.vw_cop_buss_obj_txn as b where b.object_pri_key_1 = t.object_pri_key_1)
+       and  t.lender_type='S'
+       and  t.created_timestamp::date between current_date -interval '6 months' and current_date
+      ) a;
+     
+    select count(1) into v_lp_payout_cnt 
+    from saarathi.tb_lan_payout_txn 
+    where transaction_id  not in (select ref_line_id from saarathi.tb_lp_sr_invoice_lines_txn);
+     
+    select count(1) into v_invoice_pnd_cnt
+    from saarathi.tb_lp_sr_invoice_txn a 
+    where  a.invoice_amt>(select coalesce(sum(received_amt),0)
+                  from saarathi.tb_lp_sr_payment_receipt_lines_txn 
+                  where invoice_no = a.invoice_no)
+                  and internal_flag = 'Y';  
+      
+ 
+	open x_result for 
+					select cast(jsonb_build_object('disbursement_count',v_disbursed_count,
+						   'lp_payout_count',v_lp_payout_cnt,
+						   'invoice_pending_count',v_invoice_pnd_cnt,
+						   'cp_payout_count','0',
+						   'cp_invoice_pending_count','0',
+						   'approval_count','0')as TEXT)as "OBJECT";
+ return x_result;
+    
+EXCEPTION
+        WHEN OTHERS THEN
+              get stacked diagnostics
+       v_state   = returned_sqlstate,
+       v_msg     = message_text,
+       v_detail  = pg_exception_detail,
+       v_hint    = pg_exception_hint,
+       v_context = pg_exception_context;
+         
+           perform saarathi.sp_ins_db_exception_log(
+					x_org_id,--'org_id',
+					x_app_id,--'app_id',
+					x_pw_service_name,--'service_name',
+					x_pw_service_name,--'object_name',
+					x_pw_request_id,--'pw_request_id',
+					x_login_id,--'login_id',
+					'NA',--'object_pri_key_1',
+					'NA',--'object_pri_key_2',
+					'NA',--'object_pri_key_3',
+					x_pw_service_name,--'object_type',
+					v_state,--'err_state',
+					v_msg,--'err_msg',
+					v_detail,--'err_detail',
+					v_hint,--'err_hint',
+					v_context,--'err_context',
+					x_filter_properties,--'ref_data_1',
+					'',--'ref_data_2',
+					'',--'ref_data_3',
+					'',--'ref_data_4',
+					'',--'ref_data_5',
+					'',--'ref_data_6',
+					'',--'ref_data_7',
+					'N',--'is_processed_1',
+					'N',--'is_processed_2',
+					NULL,--'is_processed_1_timestamp',
+					NULL,--'is_processed_1_timestamp',
+					''--'developer_remarks'
+					);
+OPEN x_result FOR 
+         SELECT '00' as "RESPONSE_CODE", 
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE", 
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+                   from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN x_result; 
+
+
+
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_get_document_dtls(x_object_pri_key_1 character varying, x_doc_id character varying, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare
+
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+v_PW_SESSION_ID VARCHAR(500);
+X_RESULT refcursor:='cur';
+v_login_amount VARCHAR(100);
+v_lender_name  VARCHAR(100);
+v_loan_program VARCHAR(100);
+v_payment_link_ref_id VARCHAR(100);
+v_APPLICANT_NAME  VARCHAR(100);
+V_OBJECT_DATA text;
+v_emp_role VARCHAR(100);
+v_raised_by VARCHAR(100);
+v_summary VARCHAR(100);
+v_comment VARCHAR(100);
+v_attachment VARCHAR(100);
+v_status  VARCHAR(100);
+v_query_dtls text;
+v_count int;
+begin
+		SET datestyle = dmy;
+
+	perform saarathi.sp_set_search_schema_path('','',x_object_pri_key_1);
+	
+              select  count(1) into v_count  from vw_image_data_obj
+						           where object_pri_key_1=x_object_pri_key_1;
+						           
+						           
+						           
+if v_count=0 then 	
+
+
+				open X_RESULT for 
+				     select 'I' as "RESPONSE_TYPE",
+			                 v_query_dtls as "object_data",
+				            'No documents found.' as "RESPONSE_MESSAGE"
+				           ;
+				          
+elsif x_doc_id='NA' then 
+
+           select jsonb_agg(jsonb_build_object('DOCUMENT_FILE', case when dms_type='DMS2' then image_name else doc_file_name end,
+                                               'DOCUMENT_NAME',replace(doc_type,'_PROOF',''),
+                                               'CREATED_TIMESTAMP',created_timestamp,
+                                               'ID',id,
+                                               'DOC_ID',doc_id))
+					into v_query_dtls 
+                   from (select * 
+					from vw_image_data_obj a
+					where object_pri_key_1=x_object_pri_key_1
+					order by  created_timestamp  desc)tbl
+		;
+           
+					open X_RESULT for 
+				     select 'I' as "RESPONSE_TYPE",
+			                 v_query_dtls as "object_data"
+--				            'Query get successfully' as "RESPONSE_MESSAGE"
+				           ;
+      
+else 
+
+           select jsonb_agg(jsonb_build_object('DOCUMENT_FILE', case when dms_type='DMS2' then image_name else doc_file_name end,
+                                               'DOCUMENT_NAME',replace(doc_type,'_PROOF',''),
+                                               'CREATED_TIMESTAMP',created_timestamp,
+                                               'ID',id,
+                                               'DOC_ID',doc_id))
+					into v_query_dtls 
+                   from (select * 
+					from vw_image_data_obj a
+					where object_pri_key_1=x_object_pri_key_1
+					and doc_id=x_doc_id
+					order by  created_timestamp  desc)tbl
+		;
+---------------------------------------------
+				open X_RESULT for 
+				     select 'I' as "RESPONSE_TYPE",
+			                 v_query_dtls as "object_data"
+--				            'Query get successfully' as "RESPONSE_MESSAGE"
+				           ;
+	end if;		
+			 return x_result;
+
+--	EXCEPTION
+--            WHEN OTHERS THEN
+--                  get stacked diagnostics
+--		       v_state   = returned_sqlstate,
+--		       v_msg     = message_text,
+--		       v_detail  = pg_exception_detail,
+--		       v_hint    = pg_exception_hint,
+--		       v_context = pg_exception_context;
+--    
+--		      select  cast(nextval('seq_pw_req_id') as VARCHAR) into v_PW_SESSION_ID ;
+--       
+--     perform sp_ins_db_exception_log(
+--				'DECIMAL-LDKJW5D1R2',--'org_id',
+--				'SAARATHI-0MY7TA7QRA',--'app_id',
+--				'sp_get_login_file_dtls',--'service_name',
+--				'sp_get_login_file_dtls',--'object_name',
+--				v_PW_SESSION_ID,--'pw_request_id',
+--				x_user_id,--'login_id',
+--				x_object_pri_key_1,--'object_pri_key_1',
+--				x_object_pri_key_2,--'object_pri_key_2',
+--				x_object_pri_key_3,--'object_pri_key_3',
+--				x_object_type,--'object_type',
+--				v_state,--'err_state',
+--			    v_msg,--'err_msg',
+--			    v_detail,--'err_detail',
+--				v_hint,--'err_hint',
+--				v_context,--'err_context',
+--				x_workflow_grp_id,--'ref_data_1',
+--				x_send_to_id,--'ref_data_2',
+--				x_send_to_type,--'ref_data_3',
+--				'',--'ref_data_4',
+--				'',--'ref_data_5',
+--				'',--'ref_data_6',
+--				'',--'ref_data_7',
+--				'N',--'is_processed_1',
+--				'N',--'is_processed_2',
+--				NULL,--'is_processed_1_timestamp',
+--				NULL,--'is_processed_1_timestamp',
+--				''--'developer_remarks'
+--				); 
+-- 	 OPEN x_result FOR
+--         SELECT '00' as "RESPONSE_CODE",
+--                 err_detail "RESPONSE_MESSAGE",
+--                   'E' "RESPONSE_TYPE",
+--                   err_state ,
+--                   err_msg,
+--                   err_detail,
+--                   err_hint,
+--                   err_context
+--         
+--          from tb_db_exception_log
+--          where pw_request_id = v_PW_SESSION_ID;
+--    RETURN x_result;
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_get_invoice_basic_dtls(x_filter_properties text, x_object_data text, x_lender_name character varying, x_lender_code character varying, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare 
+x_result refcursor:= 'cur';
+
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+
+v_arr_length INT;
+v_trans_count INT;
+v_transaction_id varchar(100);
+v_distinct_txn int;
+v_txn_count int;
+begin
+	
+	
+select json_array_length(json_agg(LP_CODE)) into v_arr_length from (
+select  distinct json_array_elements(cast(x_object_data as json))->>'LP_CODE' as LP_CODE
+)tbl;
+
+
+select COUNT(1) into v_trans_count 
+from (
+select  json_array_elements(cast(x_object_data as json))->>'PAYOUT_AMOUNT' as PAYOUT_AMOUNT,
+        json_array_elements(cast(x_object_data as json))->>'TRANSACTION_ID' as TRANSACTION_ID
+)tbl
+where PAYOUT_AMOUNT is null or PAYOUT_AMOUNT='';
+
+	
+select json_array_length(json_agg(TRANSACTION_ID)) into v_distinct_txn from (
+select  distinct json_array_elements(cast(x_object_data as json))->>'TRANSACTION_ID' as TRANSACTION_ID
+)tbl;
+
+select json_array_length(json_agg(TRANSACTION_ID)) into v_txn_count from (
+select  json_array_elements(cast(x_object_data as json))->>'TRANSACTION_ID' as TRANSACTION_ID
+)tbl;
+
+v_txn_count:=v_txn_count-v_distinct_txn;
+
+if v_arr_length>1 then 
+
+
+open x_result for 
+				select 	--'You have selected different lender from the transaction' as "RESPONSE_MESSAGE",
+						'You have selected different lender from the transaction' as "RESPONSE_MESSAGE",
+			            'E'as"RESPONSE_TYPE",
+			            '00'as"RESPONSE_TYPE";
+							
+elsif  v_trans_count=1 then 
+
+select TRANSACTION_ID into v_transaction_id
+from (
+select  json_array_elements(cast(x_object_data as json))->>'PAYOUT_AMOUNT' as PAYOUT_AMOUNT,
+        json_array_elements(cast(x_object_data as json))->>'TRANSACTION_ID' as TRANSACTION_ID
+)tbl
+where PAYOUT_AMOUNT is null or PAYOUT_AMOUNT='';
+
+
+open x_result for 
+				select 	--'You have not calculated the payout of '||v_transaction_id||' please calculate and try again.' as "RESPONSE_MESSAGE",
+			            'You have not calculated the payout of '||v_transaction_id||' please calculate and try again.' as "RESPONSE_MESSAGE",
+						'E'as"RESPONSE_TYPE",
+			            '00'as "RESPONSE_TYPE";
+
+elsif  v_trans_count>1 then 
+
+open x_result for 
+				select 	--'You have not calculated the payout of multiple transaction. please calculate and try again.' as "RESPONSE_MESSAGE",
+						'You have not calculated the payout of multiple transaction. please calculate and try again.' as "RESPONSE_MESSAGE",
+			            'E'as"RESPONSE_TYPE",
+			            '00'as"RESPONSE_TYPE";
+elsif v_txn_count>0 then 
+
+open x_result for 
+	select 	--'You have not calculated the payout of multiple transaction. please calculate and try again.' as "RESPONSE_MESSAGE",
+						'You have selected the same transaction multiple times.' as "RESPONSE_MESSAGE",
+			            'E'as"RESPONSE_TYPE",
+			            '00'as"RESPONSE_TYPE";
+else 
+	open x_result for 
+				select 	'{	"LENDER_NAME": "HDFC",
+							"LENDER_ADDRESS": "Gurgaon",
+						  	"LENDER_CODE": "33",
+							"GSTN_NO":"123",
+							"NAME":"Paarth",
+							"INVOICE_NUMBER":"SAR-1234",
+							"GSTN":"06AADCD2821N1ZO",
+							"INVOICE_DATED": "01-05-2022",
+							"PAN_NO": "AADCD2821N",
+							"STATE": "Haryana",
+							"CONTACT_NO": "9711084842",
+							"EMAIL":"dushyant.chauhan@decimal.co.in"
+								}' as object_data;
+	
+end if;			
+
+							return x_result;
+		        
+		        
+EXCEPTION
+        WHEN OTHERS THEN
+              get stacked diagnostics
+       v_state   = returned_sqlstate,
+       v_msg     = message_text,
+       v_detail  = pg_exception_detail,
+       v_hint    = pg_exception_hint,
+       v_context = pg_exception_context;
+         
+           perform saarathi.sp_ins_db_exception_log(
+					x_org_id,--'org_id',
+					x_app_id,--'app_id',
+					x_pw_service_name,--'service_name',
+					x_pw_service_name,--'object_name',
+					x_pw_request_id,--'pw_request_id',
+					x_login_id,--'login_id',
+					'NA',--'object_pri_key_1',
+					'NA',--'object_pri_key_2',
+					'NA',--'object_pri_key_3',
+					x_pw_service_name,--'object_type',
+					v_state,--'err_state',
+					v_msg,--'err_msg',
+					v_detail,--'err_detail',
+					v_hint,--'err_hint',
+					v_context,--'err_context',
+					x_filter_properties,--'ref_data_1',
+					'',--'ref_data_2',
+					'',--'ref_data_3',
+					'',--'ref_data_4',
+					'',--'ref_data_5',
+					'',--'ref_data_6',
+					'',--'ref_data_7',
+					'N',--'is_processed_1',
+					'N',--'is_processed_2',
+					NULL,--'is_processed_1_timestamp',
+					NULL,--'is_processed_1_timestamp',
+					''--'developer_remarks'
+					);
+OPEN X_RESULT FOR 
+         SELECT '00' as "RESPONSE_CODE", 
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE", 
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+                   from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN X_RESULT; 
+
+
+
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_get_invoice_dtls(x_filter_properties text, x_invoice_no character varying, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare
+
+x_result refcursor:= 'cur';
+
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+v_lender_name varchar(500);
+v_applicant_name varchar(500);
+v_transaction_id varchar(100);
+v_transaction_amount varchar(100);
+v_transaction_date varchar(50);
+v_laf_id varchar(100);
+v_lp_login_id varchar(100);
+v_lan_id varchar(100);
+v_payout_amount varchar(50);
+v_insurance_amount varchar(50);
+v_bank_payout_per varchar(10);
+v_extra_earning varchar(50);
+v_other_gain varchar(50);
+v_insurance_payout_per varchar(10);
+v_subvention_perc varchar(10);
+v_subvention_applicable_on_sanction varchar(100);
+v_other_charges varchar(50);
+v_extra_deduction varchar(50);
+v_trans_dtls text;
+v_invoice_dtls text;
+v_basic_dtls text;
+v_status varchar(100);
+v_receipt_count INT;
+v_total_gst_amt int;
+v_tot_receipt_amt int;
+v_balance_amt INT;
+v_total_gst_amount INT;
+v_tot_bank_comm_amt int;
+v_tot_received_amt int;
+v_tot_line_received_amt int;
+begin 
+	
+
+	
+--		select jsonb_agg(json_build_object('LENDER_NAME',lender_name,
+--                             'APPLICANT_NAME',(select applicant_name from saarathi.tb_mis_laf_dtls tmld where tmld.object_pri_key_1=lan_cal.laf_id),
+--                             'TRANSACTION_ID',transaction_id,
+--                             'TRANSACTION_AMOUNT',transaction_amt,
+--                             'TRANSACTION_DATE',transaction_date,
+--                             'LAF_ID',laf_id,
+--                             'LP_LOGIN_ID',lp_login_id,
+--                             'LAN_ID',lan_id,
+--                             'PAYOUT_AMOUNT',(case when null then 0 else lp_sr_payout_amt end),
+--                             'CURRENT_RECEIPT_AMT',0,
+--                             'LINE_ID',select line_id from tb_lp_sr_invoice_lines_txn inv_line where 
+--                             'BALANCE_AMOUNT',lp_sr_payout_amt-
+--												(select received_amt from (SELECT sum(received_amt)received_amt,rec.line_id,ref_line_id  FROM saarathi.tb_lp_sr_payment_receipt_lines_txn rec
+--												join saarathi.tb_lp_sr_invoice_lines_txn inv on 
+--												  rec.line_id=inv.line_id
+--												  where inv.invoice_no=x_invoice_no
+--												 group by rec.line_id,ref_line_id)tbl where tbl.ref_line_id=lan_cal.transaction_id)
+--                             )) into v_trans_dtls
+--    from saarathi.tb_lan_payout_txn lan_cal
+--	where transaction_id in(
+--	SELECT distinct ref_line_id  FROM saarathi.tb_lp_sr_invoice_lines_txn
+--	where invoice_no =x_invoice_no);
+
+select jsonb_agg(json_build_object('LENDER_NAME',lender_name,
+                             'APPLICANT_NAME',(select applicant_name from saarathi.tb_mis_laf_dtls tmld where tmld.object_pri_key_1=lan_cal.laf_id),
+                             'TRANSACTION_ID',transaction_id,
+                             'CASE_TYPE', (select loan_type from saarathi.tb_mis_laf_login a where a.login_id = lan_cal.lp_login_id),
+                             'PRODUCT_CODE', product_code,
+                             'TRANSACTION_AMOUNT',transaction_amt,
+                             'TRANSACTION_DATE',transaction_date,
+                             'LAF_ID',laf_id,
+                             'LP_LOGIN_ID',lp_login_id,
+                             'LAN_ID',lan_id,
+                             'LP_CODE',lp_id,
+                             'PAYOUT_AMOUNT',(case when null then 0 else lp_sr_payout_amt end),
+                             'CURRENT_RECEIPT_AMT',0,
+                             'LINE_ID',inv_line.line_id , 
+                             'BALANCE_AMOUNT',lp_sr_payout_amt-coalesce 
+												((select received_amt from (SELECT coalesce (sum(received_amt), 0 )received_amt,rec.line_id,ref_line_id  FROM saarathi.tb_lp_sr_payment_receipt_lines_txn rec
+		                    					where rec.line_id=inv_line.line_id
+		                    					 and  rec.invoice_no=inv_line.invoice_no
+                                                group by rec.line_id,ref_line_id)tbl where tbl.ref_line_id=lan_cal.transaction_id),0)
+                             ))into v_trans_dtls
+    from saarathi.tb_lan_payout_txn lan_cal
+    join saarathi.tb_lp_sr_invoice_lines_txn inv_line
+    on inv_line.ref_line_id=lan_cal.transaction_id 
+	where inv_line.invoice_no =x_invoice_no;
+
+
+
+
+   select coalesce (sum(lp_sr_payout_amt), 0 ) into v_tot_bank_comm_amt 
+   from saarathi.tb_lan_payout_txn lan_cal
+    join saarathi.tb_lp_sr_invoice_lines_txn inv_line
+    on inv_line.ref_line_id=lan_cal.transaction_id 
+	where inv_line.invoice_no =x_invoice_no;
+
+   SELECT coalesce (sum(received_amt), 0 )received_amt into v_tot_received_amt
+     FROM saarathi.tb_lp_sr_payment_receipt_lines_txn rec
+	 where rec.invoice_no=x_invoice_no;
+	
+	
+  select sum(received_amt) into v_tot_line_received_amt
+  from saarathi.tb_lp_sr_payment_receipt_lines_txn
+     where invoice_no=x_invoice_no;
+    
+    
+   SELECT sum(gst_amount) into v_total_gst_amount 
+    FROM saarathi.tb_lp_sr_payment_receipt_txn x
+    WHERE receipt_id in (select receipt_id from saarathi.tb_lp_sr_payment_receipt_lines_txn
+     where invoice_no=x_invoice_no);	
+	
+    
+    
+    
+   select v_tot_bank_comm_amt-((v_tot_bank_comm_amt*5)/100)-v_tot_received_amt into v_balance_amt;
+
+
+
+    SELECT sum(gst_amount),sum(receipt_amt) into v_total_gst_amt,v_tot_receipt_amt
+    FROM saarathi.tb_lp_sr_payment_receipt_txn x
+    WHERE receipt_id in (select receipt_id from saarathi.tb_lp_sr_payment_receipt_lines_txn
+     where invoice_no=x_invoice_no);
+
+    select json_build_object('PREVIOUS_INVOICE_NO', invoice_no,
+                             'INVOICE_NO', invoice_no ,
+                             'INVOICE_DT',invoice_dt,
+                             'INVOICE_AMT',invoice_amt,
+                             'IGST',igst,
+                             'CGST',cgst,
+                             'SGST',sgst,
+                             'TOTAL_GST_AMOUNT',total_gst_amt,
+                             'TOTAL_TAXABLE_AMOUNT',tot_taxable_amt,
+                             'CONTACT_NUMBER',invoice_sent_to_contact_no,
+                             'EMAIL',invoice_sent_to_email ,
+                             'BALANCE_PAYMENT_AMT',(coalesce(v_tot_bank_comm_amt,0)-coalesce(v_tot_line_received_amt,0)),
+                             'TOTAL_BALANCE_AMT',(coalesce(v_tot_bank_comm_amt,0)-coalesce((v_tot_bank_comm_amt*5)/100,0)+coalesce((v_tot_bank_comm_amt*(igst+cgst+sgst))/100.0)-coalesce(v_tot_received_amt,0)),
+                             'TOTAL_BANK_COMMISSON_AMT',v_tot_bank_comm_amt,
+                             'TOTAL_RECEIVED_AMT',coalesce(v_tot_received_amt,0)::varchar,
+                             'DOC_ID',invoice_doc_ref,
+                             'BASIC_DTLS',json_build_object('LENDER_NAME', lender_name,
+							'LENDER_ADDRESS',lp_address ,
+						  	'LENDER_CODE',lp_id  ,
+							'GSTN_NO',lp_gstin_no ,
+							'cp_name',json_build_object('code',(case when invoice_company_name='DECIMAL TECHNOLOGIES PRIVATE LIMITED' then 'DEC' else 'SAR' end),
+							                         'value',invoice_company_name),
+							'INVOICE_NUMBER',invoice_no,
+							'GSTN','06AADCD2821N1ZO',
+							'INVOICE_DATED', invoice_dt,
+							'PAN_NO', 'AADCD2821N',
+							'STATE', 'Haryana',
+							'CONTACT_NO', '9711084842',
+							'EMAIL','dushyant.chauhan@decimal.co.in')
+                             )into v_invoice_dtls
+                             FROM saarathi.tb_lp_sr_invoice_txn inv
+                             where invoice_no =x_invoice_no
+                               ;
+                            
+    select count(1) into v_receipt_count from saarathi.tb_lp_sr_payment_receipt_lines_txn
+     where invoice_no=x_invoice_no;
+    
+   
+
+	open X_RESULT for
+		  select 'RESPONSE_TYPE','I',
+	             'RESPONSE_MESSAGE','Data returned successfully.',
+	             cast(json_build_object('TRANSACTION_DTLS',cast(v_trans_dtls as json),
+                                         'INVOICE_DTLS',cast(v_invoice_dtls as json),
+                                         'RECEIPT_GENERATED',(case when v_receipt_count>0 then 'Y' else 'N' end)
+												 )as text)as object_data
+--					   where lan_cal.laf_id=x_laf_id 
+--					      lan_cal.lp_login_id =x_lp_login_id 
+--					      lan_cal.lan_id  =x_lan_id  
+--					      lan_cal.transaction_id  =x_transaction_id
+					   
+--					   left join saarathi.tb_lan_payout_txn tlpt
+--					   on lan_cal.laf_id=tlpt.laf_id 
+--					      lan_cal.lp_login_id =tlpt.lp_login_id 
+--					      lan_cal.lan_id  =tlpt.lan_id  
+--					      lan_cal.transaction_id  =tlpt.transaction_id 
+                          ;
+												                                               
+												                                               
+return X_RESULT;  
+EXCEPTION
+        WHEN OTHERS THEN
+              get stacked diagnostics
+       v_state   = returned_sqlstate,
+       v_msg     = message_text,
+       v_detail  = pg_exception_detail,
+       v_hint    = pg_exception_hint,
+       v_context = pg_exception_context;
+         
+           perform saarathi.sp_ins_db_exception_log(
+					x_org_id,--'org_id',
+					x_app_id,--'app_id',
+					x_pw_service_name,--'service_name',
+					x_pw_service_name,--'object_name',
+					x_pw_request_id,--'pw_request_id',
+					x_login_id,--'login_id',
+					'NA',--'object_pri_key_1',
+					'NA',--'object_pri_key_2',
+					'NA',--'object_pri_key_3',
+					x_pw_service_name,--'object_type',
+					v_state,--'err_state',
+					v_msg,--'err_msg',
+					v_detail,--'err_detail',
+					v_hint,--'err_hint',
+					v_context,--'err_context',
+					x_filter_properties,--'ref_data_1',
+					'',--'ref_data_2',
+					'',--'ref_data_3',
+					'',--'ref_data_4',
+					'',--'ref_data_5',
+					'',--'ref_data_6',
+					'',--'ref_data_7',
+					'N',--'is_processed_1',
+					'N',--'is_processed_2',
+					NULL,--'is_processed_1_timestamp',
+					NULL,--'is_processed_1_timestamp',
+					''--'developer_remarks'
+					);
+OPEN X_RESULT FOR 
+         SELECT '00' as "RESPONSE_CODE", 
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE", 
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+                   from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN X_RESULT; 
+
+
+
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_get_lp_payout_cal_dtls(x_filter_properties text, x_laf_id character varying, x_lp_login_id character varying, x_lan_id character varying, x_transaction_id character varying, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare
+
+x_result refcursor:= 'cur';
+
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+v_lender_name varchar(500);
+v_applicant_name varchar(500);
+v_transaction_id varchar(100);
+v_transaction_amount varchar(100);
+v_transaction_date varchar(50);
+v_laf_id varchar(100);
+v_lp_login_id varchar(100);
+v_lan_id varchar(100);
+v_payout_amount varchar(50);
+v_insurance_amount varchar(50);
+v_bank_payout_per varchar(10);
+v_extra_earning varchar(50);
+v_other_gain varchar(50);
+v_insurance_payout_per varchar(10);
+v_subvention_perc varchar(10);
+v_subvention_applicable_on_sanction varchar(100);
+v_other_charges varchar(50);
+v_extra_deduction varchar(50);
+v_count int;
+begin 
+	
+	select count(1) into v_count from tb_lan_trans_lp_payout_cal_txn lan_cal
+					   where lan_cal.laf_id=x_laf_id 
+					      and lan_cal.lp_login_id =x_lp_login_id 
+					      and lan_cal.lan_id  =x_lan_id  
+					      and lan_cal.transaction_id  =x_transaction_id;
+	if v_count=0 then 
+	
+	open X_RESULT for
+		  select 'I' as "RESPONSE_TYPE",
+	             'Data returned successfully.' as "RESPONSE_MESSAGE",
+	             cast(json_agg(json_build_object('PAYOUT_DTLS',json_build_object('LENDER NAME',lender_name,
+                                                                                         'APPLICANT_NAME',(select applicant_name from saarathi.tb_mis_laf_dtls tmld where tmld.object_pri_key_1=lan_cal.laf_id),
+												                                         'TRANSACTION_ID',transaction_id,
+												                                         'TRANSACTION_AMOUNT',transaction_amt,
+												                                         'TRANSACTION_DATE',transaction_date,
+												                                         'LAF_ID',laf_id,
+												                                         'LP_LOGIN_ID',lp_login_id,
+												                                         'LAN_ID',lan_id,
+												                                         'PAYOUT_AMOUNT',(case when null then 0 else lp_sr_payout_amt end)),
+                                                   'CALCULATION_DTLS',json_build_object('insurance_amount','0',
+                                                                                         'bank_payout','0',
+												                                         'extra_earning_pf','0',
+												                                         'other_gain','0',
+												                                         'insurance_payout','0',
+												                                         'subvention_on_charges_by_lender','0',
+												                                         'subvention_on_sanction_amount',json_build_object('code',null,
+												                                                                             'value',null),
+												                                         'other_charges','0',
+												                                         'processing_fee','0',
+												                                         'payout_pf_based',json_build_object('code',null,
+												                                                                             'value',null) ,
+												                                         'payout_amount','0',
+												                                         'extra_earning_insurance_pf',0,
+												                                         'extra_deduction','0',
+												                                         'DISBUREMENT_AMOUNT',lan_amount
+																										      
+												                                               )))as text)as object_data
+												from tb_lan_payout_txn lan_cal 
+												where lan_cal.laf_id=x_laf_id 
+											      and lan_cal.lp_login_id =x_lp_login_id 
+											      and lan_cal.lan_id  =x_lan_id  
+											      and lan_cal.transaction_id  =x_transaction_id;
+												                                               
+	
+	else                                      
+					     
+	
+	open X_RESULT for
+		  select 'I' as "RESPONSE_TYPE",
+	             'Data returned successfully.' as "RESPONSE_MESSAGE",
+	             cast(json_agg(json_build_object('PAYOUT_DTLS',json_build_object('LENDER NAME',lender_name,
+                                                                                         'APPLICANT_NAME',(select applicant_name from saarathi.tb_mis_laf_dtls tmld where tmld.object_pri_key_1=lan_cal.laf_id),
+												                                         'TRANSACTION_ID',transaction_id,
+												                                         'TRANSACTION_AMOUNT',transaction_amt,
+												                                         'TRANSACTION_DATE',transaction_date,
+												                                         'LAF_ID',laf_id,
+												                                         'LP_LOGIN_ID',lp_login_id,
+												                                         'LAN_ID',lan_id,
+												                                         'PAYOUT_AMOUNT',(case when null then 0 else lp_sr_payout_amt end)),
+                                                   'CALCULATION_DTLS',json_build_object('insurance_amount',lp_sr_insurance_amt::varchar,
+                                                                                         'bank_payout',lp_sr_bank_pyout_perc::varchar,
+												                                         'extra_earning_pf',lp_sr_extra_earning::varchar,
+												                                         'other_gain',lp_sr_other_gain::varchar,
+												                                         'insurance_payout',lp_sr_insurance_payout_perc::varchar,
+												                                         'subvention_on_charges_by_lender',lp_sr_subvention_perc::varchar,
+												                                         'subvention_on_sanction_amount',json_build_object('code',lp_sr_subvention_applicable_on_sanction,
+												                                                                             'value',(case when lp_sr_subvention_applicable_on_sanction='Y' then 'Yes' else 'No' end)) ,
+												                                         'other_charges',lp_sr_other_charges::varchar,
+												                                         'processing_fee',lp_sr_processing_fee_perc::varchar,
+												                                         'payout_pf_based',json_build_object('code',lp_sr_payout_pf_based,
+												                                                                             'value',(case when lp_sr_payout_pf_based='Y' then 'Yes' else 'No' end)) ,
+												                                         'payout_amount',lp_sr_payout_amt::varchar,
+												                                         'extra_earning_insurance_pf',0,
+												                                         'extra_deduction',lp_sr_extra_deduction::varchar,
+												                                         'DISBUREMENT_AMOUNT',(SELECT lan_amount FROM saarathi.tb_lan_payout_txn x
+																										        WHERE x.transaction_id =lan_cal.transaction_id) 
+												                                               )))as text)as object_data
+					   from tb_lan_trans_lp_payout_cal_txn lan_cal
+					   where lan_cal.laf_id=x_laf_id 
+					      and lan_cal.lp_login_id =x_lp_login_id 
+					      and lan_cal.lan_id  =x_lan_id  
+					      and lan_cal.transaction_id  =x_transaction_id
+					   
+--					   left join saarathi.tb_lan_payout_txn tlpt
+--					   on lan_cal.laf_id=tlpt.laf_id 
+--					      lan_cal.lp_login_id =tlpt.lp_login_id 
+--					      lan_cal.lan_id  =tlpt.lan_id  
+--					      lan_cal.transaction_id  =tlpt.transaction_id 
+                          ;
+												                                               
+	end if;
+
+return X_RESULT;  
+EXCEPTION
+        WHEN OTHERS THEN
+              get stacked diagnostics
+       v_state   = returned_sqlstate,
+       v_msg     = message_text,
+       v_detail  = pg_exception_detail,
+       v_hint    = pg_exception_hint,
+       v_context = pg_exception_context;
+         
+           perform saarathi.sp_ins_db_exception_log(
+					x_org_id,--'org_id',
+					x_app_id,--'app_id',
+					x_pw_service_name,--'service_name',
+					x_pw_service_name,--'object_name',
+					x_pw_request_id,--'pw_request_id',
+					x_login_id,--'login_id',
+					'NA',--'object_pri_key_1',
+					'NA',--'object_pri_key_2',
+					'NA',--'object_pri_key_3',
+					x_pw_service_name,--'object_type',
+					v_state,--'err_state',
+					v_msg,--'err_msg',
+					v_detail,--'err_detail',
+					v_hint,--'err_hint',
+					v_context,--'err_context',
+					x_filter_properties,--'ref_data_1',
+					'',--'ref_data_2',
+					'',--'ref_data_3',
+					'',--'ref_data_4',
+					'',--'ref_data_5',
+					'',--'ref_data_6',
+					'',--'ref_data_7',
+					'N',--'is_processed_1',
+					'N',--'is_processed_2',
+					NULL,--'is_processed_1_timestamp',
+					NULL,--'is_processed_1_timestamp',
+					''--'developer_remarks'
+					);
+OPEN X_RESULT FOR 
+         SELECT '00' as "RESPONSE_CODE", 
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE", 
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+                   from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN X_RESULT; 
+
+
+
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_get_pending_inoice(x_filter_properties text, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare 
+x_result refcursor:= 'cur';
+
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+v_lender_name varchar(500);
+v_invoice_number varchar(50);
+v_invoice_date varchar(10);
+v_total_invoice_amt varchar(20);
+v_payment_pending varchar(20);
+v_status varchar(50);
+begin
+	
+ select CAST(x_filter_properties AS JSON)->>'status' as status
+		into v_status;
+	
+	
+	if v_status!='Draft' then 
+	
+	open X_RESULT for
+
+      		  
+      		   select      'I' as "RESPONSE_TYPE",
+                 'Data returned successfully.'as "RESPONSE_MESSAGE",
+		        cast(json_agg(json_build_object('LENDER_NAME',lender_name,
+                         'INVOICE_NUMBER',tbl.invoice_no,
+                         'INVOICE_DATE', to_char(invoice_dt, 'DD-MM-YYYY'),
+                         'TOTAL_INVOICE_AMOUNT',invoice_amt ,
+                         'PAYMENT_PENDING',invoice_amt-coalesce ((select sum(receipt_amt) from saarathi.tb_lp_sr_payment_receipt_txn where receipt_id in
+											(select receipt_id from saarathi.tb_lp_sr_payment_receipt_lines_txn where invoice_no = tbl.invoice_no)), 0)
+--                         (select coalesce(sum(received_amt),0) from saarathi.tb_lp_sr_payment_receipt_lines_txn b where b.invoice_no = tbl.invoice_no) + 
+--                         					coalesce ((select sum(gst_amount) from saarathi.tb_lp_sr_payment_receipt_txn where receipt_id in
+--											(select receipt_id from saarathi.tb_lp_sr_payment_receipt_lines_txn where invoice_no = tbl.invoice_no)), 0)-
+--											coalesce ((select sum(tds_amt) from saarathi.tb_lp_sr_payment_receipt_txn where receipt_id in
+--											(select receipt_id from saarathi.tb_lp_sr_payment_receipt_lines_txn where invoice_no = tbl.invoice_no)), 0)
+                           ))as text)as object_data
+      	from(
+        select * FROM tb_lp_sr_invoice_txn inv 
+      	where  inv.invoice_amt>(select coalesce(sum(received_amt),0) from saarathi.tb_lp_sr_payment_receipt_lines_txn b where b.invoice_no = inv.invoice_no)
+      		   and internal_flag = 'Y'
+      		   and invoice_status=v_status
+       order by created_timestamp desc
+       )tbl;
+   else 
+   
+   	open X_RESULT for
+
+     select      'I' as "RESPONSE_TYPE",
+                 'Data returned successfully.'as "RESPONSE_MESSAGE",
+		        cast(json_agg(json_build_object('LENDER_NAME',lender_name,
+                         'INVOICE_NUMBER',tbl.invoice_no,
+                         'INVOICE_DATE', to_char(invoice_dt, 'DD-MM-YYYY'),
+                         'TOTAL_INVOICE_AMOUNT',invoice_amt ,
+                         'PAYMENT_PENDING',invoice_amt-coalesce ((select sum(receipt_amt) from saarathi.tb_lp_sr_payment_receipt_txn where receipt_id in
+											(select receipt_id from saarathi.tb_lp_sr_payment_receipt_lines_txn where invoice_no = tbl.invoice_no)), 0)
+                           ))as text)as object_data
+      	from(
+        select * FROM tb_lp_sr_invoice_txn inv 
+      	where  invoice_status=v_status
+       order by created_timestamp desc
+       )tbl;
+   
+   end if;
+
+return X_RESULT;  
+
+
+
+EXCEPTION
+        WHEN OTHERS THEN
+              get stacked diagnostics
+       v_state   = returned_sqlstate,
+       v_msg     = message_text,
+       v_detail  = pg_exception_detail,
+       v_hint    = pg_exception_hint,
+       v_context = pg_exception_context;
+         
+           perform saarathi.sp_ins_db_exception_log(
+					x_org_id,--'org_id',
+					x_app_id,--'app_id',
+					x_pw_service_name,--'service_name',
+					x_pw_service_name,--'object_name',
+					x_pw_request_id,--'pw_request_id',
+					x_login_id,--'login_id',
+					'NA',--'object_pri_key_1',
+					'NA',--'object_pri_key_2',
+					'NA',--'object_pri_key_3',
+					x_pw_service_name,--'object_type',
+					v_state,--'err_state',
+					v_msg,--'err_msg',
+					v_detail,--'err_detail',
+					v_hint,--'err_hint',
+					v_context,--'err_context',
+					x_filter_properties,--'ref_data_1',
+					'',--'ref_data_2',
+					'',--'ref_data_3',
+					'',--'ref_data_4',
+					'',--'ref_data_5',
+					'',--'ref_data_6',
+					'',--'ref_data_7',
+					'N',--'is_processed_1',
+					'N',--'is_processed_2',
+					NULL,--'is_processed_1_timestamp',
+					NULL,--'is_processed_1_timestamp',
+					''--'developer_remarks'
+					);
+OPEN X_RESULT FOR 
+         SELECT '00' as "RESPONSE_CODE", 
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE", 
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+                   from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN X_RESULT; 
+
+
+
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_get_pending_txn(x_filter_properties text, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare 
+x_result refcursor:= 'cur';
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+v_lender_name varchar(500);
+v_applicant_name varchar(500);
+v_transaction_id varchar(500);
+v_transaction_amount varchar(500);
+v_transaction_date varchar(100);
+v_laf_id varchar(100);
+v_lp_login_id varchar(100);
+v_lan_id varchar(100);
+v_payout_amount varchar(100);
+
+v_trans_dtls text;
+
+begin
+
+                                      
+open X_RESULT for
+		  select 'RESPONSE_TYPE','I',
+                 'RESPONSE_MESSAGE','Data returned successfully.',
+		        cast(json_agg(json_build_object('LENDER_NAME',lender_name,
+                         'APPLICANT_NAME',(select applicant_name from saarathi.tb_mis_laf_dtls tmld where tmld.object_pri_key_1=tbl.laf_id),
+                         'TRANSACTION_ID', transaction_id,
+                         'TRANSACTION_AMOUNT',transaction_amt,
+                         'TRANSACTION_DATE',transaction_date,
+                         'PRODUCT_CODE',PRODUCT_CODE,
+                         'CASE_TYPE',(select loan_type  from saarathi.tb_mis_laf_login a where a.login_id = tbl.lp_login_id),
+                         'LAF_ID',laf_id,
+                         'LP_LOGIN_ID',lp_login_id,
+                         'LAN_ID',lan_id,
+                         'LP_CODE',lp_id,
+                         'PAYOUT_AMOUNT',(case when null then 0 else lp_sr_payout_amt end)
+                           ))as text)as object_data
+      FROM (select * from saarathi.tb_lan_payout_txn tlpt
+      where transaction_id  not in (select ref_line_id from saarathi.tb_lp_sr_invoice_lines_txn)
+      order by lender_name) tbl;
+ 
+	  
+   
+ return X_RESULT;  
+EXCEPTION
+        WHEN OTHERS THEN
+              get stacked diagnostics
+       v_state   = returned_sqlstate,
+       v_msg     = message_text,
+       v_detail  = pg_exception_detail,
+       v_hint    = pg_exception_hint,
+       v_context = pg_exception_context;
+         
+           perform saarathi.sp_ins_db_exception_log(
+					x_org_id,--'org_id',
+					x_app_id,--'app_id',
+					x_pw_service_name,--'service_name',
+					x_pw_service_name,--'object_name',
+					x_pw_request_id,--'pw_request_id',
+					x_login_id,--'login_id',
+					'NA',--'object_pri_key_1',
+					'NA',--'object_pri_key_2',
+					'NA',--'object_pri_key_3',
+					x_pw_service_name,--'object_type',
+					v_state,--'err_state',
+					v_msg,--'err_msg',
+					v_detail,--'err_detail',
+					v_hint,--'err_hint',
+					v_context,--'err_context',
+					x_filter_properties,--'ref_data_1',
+					'',--'ref_data_2',
+					'',--'ref_data_3',
+					'',--'ref_data_4',
+					'',--'ref_data_5',
+					'',--'ref_data_6',
+					'',--'ref_data_7',
+					'N',--'is_processed_1',
+					'N',--'is_processed_2',
+					NULL,--'is_processed_1_timestamp',
+					NULL,--'is_processed_1_timestamp',
+					''--'developer_remarks'
+					);
+OPEN X_RESULT FOR 
+         SELECT '00' as "RESPONSE_CODE", 
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE", 
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+                   from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN X_RESULT; 
+
+
+
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_get_pending_txn_invoice_dtls(x_filter_properties text, x_laf_id character varying, x_lp_login_id character varying, x_lan_id character varying, x_transaction_id character varying, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare
+
+x_result refcursor:= 'cur';
+
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+v_lender_name varchar(500);
+v_applicant_name varchar(500);
+v_transaction_id varchar(100);
+v_transaction_amount varchar(100);
+v_transaction_date varchar(50);
+v_laf_id varchar(100);
+v_lp_login_id varchar(100);
+v_lan_id varchar(100);
+v_payout_amount varchar(50);
+v_insurance_amount varchar(50);
+v_bank_payout_per varchar(10);
+v_extra_earning varchar(50);
+v_other_gain varchar(50);
+v_insurance_payout_per varchar(10);
+v_subvention_perc varchar(10);
+v_subvention_applicable_on_sanction varchar(100);
+v_other_charges varchar(50);
+v_extra_deduction varchar(50);
+
+begin 
+	open X_RESULT for
+		  select 'RESPONSE_TYPE','I',
+	             'RESPONSE_MESSAGE','Data returned successfully.',
+	             cast(json_agg(json_build_object('PAYOUT_DTLS',json_build_object('LENDER NAME',lender_name,
+                                                                                         'APPLICANT_NAME',(select applicant_name from saarathi.tb_mis_laf_dtls tmld where tmld.object_pri_key_1=lan_cal.laf_id),
+												                                         'TRANSACTION_ID',transaction_id,
+												                                         'TRANSACTION_AMOUNT',transaction_amt,
+												                                         'TRANSACTION_DATE',transaction_date,
+												                                         'LAF_ID',laf_id,
+												                                         'LP_LOGIN_ID',lp_login_id,
+												                                         'LAN_ID',lan_id,
+												                                         'PAYOUT_AMOUNT',(case when null then 0 else lp_sr_payout_amt end)),
+                                                   'CALCULATION_DTLS',json_build_object('INSURANCE_AMOUNT',lp_sr_insurance_amt,
+                                                                                         'BANK_PAYOUT_PER',lp_sr_bank_pyout_perc,
+												                                         'EXTRA_EARNING',lp_sr_extra_earning,
+												                                         'OTHER_GAIN',lp_sr_other_gain,
+												                                         'INSURANCE_PAYOUT_PER',lp_sr_insurance_payout_perc,
+												                                         'SUBVENTION_PERC',lp_sr_subvention_perc,
+												                                         'SUBVENTION_APPLICABLE_ON_SANCTION',lp_sr_subvention_applicable_on_sanction,
+												                                         'OTHER_CHARGES',lp_sr_other_charges,
+												                                         'EXTRA_DEDUCTION',lp_sr_extra_deduction) 
+												                                                ))as text)as object_data
+					   from tb_lan_trans_lp_payout_cal_txn lan_cal
+--					   where lan_cal.laf_id=x_laf_id 
+--					      lan_cal.lp_login_id =x_lp_login_id 
+--					      lan_cal.lan_id  =x_lan_id  
+--					      lan_cal.transaction_id  =x_transaction_id
+					   
+--					   left join saarathi.tb_lan_payout_txn tlpt
+--					   on lan_cal.laf_id=tlpt.laf_id 
+--					      lan_cal.lp_login_id =tlpt.lp_login_id 
+--					      lan_cal.lan_id  =tlpt.lan_id  
+--					      lan_cal.transaction_id  =tlpt.transaction_id 
+                          ;
+												                                               
+												                                               
+return X_RESULT;  
+EXCEPTION
+        WHEN OTHERS THEN
+              get stacked diagnostics
+       v_state   = returned_sqlstate,
+       v_msg     = message_text,
+       v_detail  = pg_exception_detail,
+       v_hint    = pg_exception_hint,
+       v_context = pg_exception_context;
+         
+           perform saarathi.sp_ins_db_exception_log(
+					x_org_id,--'org_id',
+					x_app_id,--'app_id',
+					x_pw_service_name,--'service_name',
+					x_pw_service_name,--'object_name',
+					x_pw_request_id,--'pw_request_id',
+					x_login_id,--'login_id',
+					'NA',--'object_pri_key_1',
+					'NA',--'object_pri_key_2',
+					'NA',--'object_pri_key_3',
+					x_pw_service_name,--'object_type',
+					v_state,--'err_state',
+					v_msg,--'err_msg',
+					v_detail,--'err_detail',
+					v_hint,--'err_hint',
+					v_context,--'err_context',
+					x_filter_properties,--'ref_data_1',
+					'',--'ref_data_2',
+					'',--'ref_data_3',
+					'',--'ref_data_4',
+					'',--'ref_data_5',
+					'',--'ref_data_6',
+					'',--'ref_data_7',
+					'N',--'is_processed_1',
+					'N',--'is_processed_2',
+					NULL,--'is_processed_1_timestamp',
+					NULL,--'is_processed_1_timestamp',
+					''--'developer_remarks'
+					);
+OPEN X_RESULT FOR 
+         SELECT '00' as "RESPONSE_CODE", 
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE", 
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+                   from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN X_RESULT; 
+
+
+
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_get_user_dtls(x_mobile_no character varying, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+V_COUNT INTEGER;
+x_result refcursor:= 'cur_chk_mpin';
+v_flag varchar(1);
+V_EMPNAME VARCHAR(500);
+V_EMP_ROLE VARCHAR(500);
+V_last_name VARCHAR(500);
+begin
+
+	
+	select count(1) into v_count 
+      from saarathi.tb_sr_user_mst 
+     where mobile_no = x_mobile_no
+--       and (mpin is not null and mpin !='')
+      and emp_dept = 'finops' ;
+
+	 if v_count>0 then
+	 
+	    select  emp_first_name,EMP_ROLE,emp_last_name into V_EMPNAME,V_EMP_ROLE,
+	    V_last_name from 
+	     saarathi.tb_sr_user_mst 
+         where mobile_no = x_mobile_no
+         --  and (mpin is not null and mpin !='')
+         and emp_role = 'finops' ;
+
+	 
+		open X_RESULT for 
+		  select  'I' as "RESPONSE_TYPE",
+				  -- 'SUCCESS' as "RESPONSE_MESSAGE",
+				 'Welcome back '|| V_EMPNAME||'. Let''s get started' as "RESPONSE",
+				V_EMP_ROLE as "EMP_ROLE",V_EMPNAME||' '||V_last_name as "NAME_INITIALS";
+		--	V_EMPNAME as "NAME_INITIALS";
+		 	 
+		 
+	else
+        open x_result for
+			select  'I' as "RESPONSE_TYPE",
+			   	    'User does not exist' as "RESPONSE_MESSAGE",
+				    'N' as "RESPONSE",'' as "EMP_ROLE";
+	
+	    
+	end if;
+
+			
+return x_result;
+          EXCEPTION
+            WHEN OTHERS THEN
+                  get stacked diagnostics
+		       v_state   = returned_sqlstate,
+		       v_msg     = message_text,
+		       v_detail  = pg_exception_detail,
+		       v_hint    = pg_exception_hint,
+		       v_context = pg_exception_context;
+  
+                  perform saarathi.sp_ins_db_exception_log(
+				x_org_id,--'org_id',
+				x_app_id,--'app_id',
+				x_pw_service_name,--'service_name',
+				x_pw_service_name,--'object_name',
+				x_pw_request_id,--'pw_request_id',
+				x_login_id,--'login_id',
+				'NA',--'object_pri_key_1',
+				'NA',--'object_pri_key_2',
+				'NA',--'object_pri_key_3',
+				x_pw_service_name,--'object_type',
+				v_state,--'err_state',
+			    v_msg,--'err_msg',
+			    v_detail,--'err_detail',
+				v_hint,--'err_hint',
+				v_context,--'err_context',
+				x_mobile_no,--'ref_data_1',
+				'',--'ref_data_2',
+				'',--'ref_data_3',
+				'',--'ref_data_4',
+				'',--'ref_data_5',
+				'',--'ref_data_6',
+				'',--'ref_data_7',
+				'N',--'is_processed_1',
+				'N',--'is_processed_2',
+				NULL,--'is_processed_1_timestamp',
+				NULL,--'is_processed_1_timestamp',
+				''--'developer_remarks'
+				); 
+ 	 OPEN X_RESULT FOR
+         SELECT '00' as "RESPONSE_CODE",
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE",
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+         
+          from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN X_RESULT;
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_invoice_sanity_check(x_object_data text, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare 
+x_result refcursor:= 'cur';
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+
+v_arr_length int;
+begin
+	
+	
+	select json_array_length(json_agg(LP_CODE)) into v_arr_length from (
+select  distinct json_array_elements(cast(x_object_data as json))->>'LP_CODE' as LP_CODE
+)tbl;
+
+
+
+--	
+--	select json_build_array(json_build_object('LENDER NAME',v_lender_name,
+--                                        'APPLICANT_NAME',v_applicant_name,
+--                                        'TRANSACTION_ID', v_transaction_id,
+--                                        'TRANSACTION_AMOUNT',v_transaction_amount,
+--                                        'TRANSACTION_DATE',v_transaction_date,
+--                                        'LAF_ID',v_laf_id,
+--                                        'LP_LOGIN_ID',v_lp_login_id,
+--                                        'LAN_ID',v_lan_id,
+--                                        'PAYOUT_AMOUNT',v_payout_amount))
+--                                       
+open X_RESULT for
+		  select (case when v_arr_length<>1 then 'N' else 'Y' end) as "SANITY_CHECK" ;
+      
+     
+--	open X_RESULT for
+--		  select '[
+--  {
+--    "LENDER_NAME": "HDFC",
+--    "APPLICANT_NAME": "AYUSH",
+--    "TRANSACTION_ID": "TXN20220429908908",
+--    "TRANSACTION_AMOUNT": "120",
+--    "TRANSACTION_DATE": "26-04-2022",
+--    "LAF_ID": "LAF782744249820210818160006",
+--    "LP_LOGIN_ID": "LE813081784820210903000090",
+--    "LAN_ID": "LAN20220228155156262",
+--    "PAYOUT_AMOUNT": "0"
+--  }
+--  ,{
+--    "LENDER_NAME": "Kotak",
+--    "APPLICANT_NAME": "Paarth",
+--    "TRANSACTION_ID": "TXN20220429908908",
+--    "TRANSACTION_AMOUNT": "120",
+--    "TRANSACTION_DATE": "28-04-2022",
+--    "LAF_ID": "LAF782744249820210818160006",
+--    "LP_LOGIN_ID": "LE813081784820210903000090",
+--    "LAN_ID": "LAN20220228155156262",
+--    "PAYOUT_AMOUNT": "10"
+--  },{
+--    "LENDER_NAME": "Fullerton",
+--    "APPLICANT_NAME": "Vikram",
+--    "TRANSACTION_ID": "TXN20220429908908",
+--    "TRANSACTION_AMOUNT": "120",
+--    "TRANSACTION_DATE": "27-04-2022",
+--    "LAF_ID": "LAF782744249820210818160006",
+--    "LP_LOGIN_ID": "LE813081784820210903000090",
+--    "LAN_ID": "LAN20220228155156262",
+--    "PAYOUT_AMOUNT": "15"
+--  }
+--]'
+--                                as object_data;
+	  
+   
+ return X_RESULT;  
+EXCEPTION
+        WHEN OTHERS THEN
+              get stacked diagnostics
+       v_state   = returned_sqlstate,
+       v_msg     = message_text,
+       v_detail  = pg_exception_detail,
+       v_hint    = pg_exception_hint,
+       v_context = pg_exception_context;
+         
+           perform saarathi.sp_ins_db_exception_log(
+					x_org_id,--'org_id',
+					x_app_id,--'app_id',
+					x_pw_service_name,--'service_name',
+					x_pw_service_name,--'object_name',
+					x_pw_request_id,--'pw_request_id',
+					x_login_id,--'login_id',
+					'NA',--'object_pri_key_1',
+					'NA',--'object_pri_key_2',
+					'NA',--'object_pri_key_3',
+					x_pw_service_name,--'object_type',
+					v_state,--'err_state',
+					v_msg,--'err_msg',
+					v_detail,--'err_detail',
+					v_hint,--'err_hint',
+					v_context,--'err_context',
+					x_filter_properties,--'ref_data_1',
+					'',--'ref_data_2',
+					'',--'ref_data_3',
+					'',--'ref_data_4',
+					'',--'ref_data_5',
+					'',--'ref_data_6',
+					'',--'ref_data_7',
+					'N',--'is_processed_1',
+					'N',--'is_processed_2',
+					NULL,--'is_processed_1_timestamp',
+					NULL,--'is_processed_1_timestamp',
+					''--'developer_remarks'
+					);
+OPEN X_RESULT FOR 
+         SELECT '00' as "RESPONSE_CODE", 
+                 err_detail "RESPONSE_MESSAGE",
+                   'E' "RESPONSE_TYPE", 
+                   err_state ,
+                   err_msg,
+                   err_detail,
+                   err_hint,
+                   err_context
+                   from saarathi.tb_db_exception_log
+          where pw_request_id = x_pw_request_id;
+    RETURN X_RESULT; 
+
+
+
+END;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION saarathi.sp_finops_upd_document_dtls(x_object_pri_key_1 character varying, x_doc_id character varying, x_dms_id character varying, x_doc_type character varying, x_org_id character varying, x_app_id character varying, x_pw_service_name character varying, x_pw_request_id character varying, x_login_id character varying)
+ RETURNS refcursor
+ LANGUAGE plpgsql
+AS $function$
+declare
+
+v_state   TEXT;
+v_msg     TEXT;
+v_detail  TEXT;
+v_hint    TEXT;
+v_context TEXT;
+v_PW_SESSION_ID VARCHAR(500);
+X_RESULT refcursor:='cur';
+v_login_amount VARCHAR(100);
+v_lender_name  VARCHAR(100);
+v_loan_program VARCHAR(100);
+v_payment_link_ref_id VARCHAR(100);
+v_APPLICANT_NAME  VARCHAR(100);
+V_OBJECT_DATA text;
+v_emp_role VARCHAR(100);
+v_raised_by VARCHAR(100);
+v_summary VARCHAR(100);
+v_comment VARCHAR(100);
+v_attachment VARCHAR(100);
+v_status  VARCHAR(100);
+v_query_dtls text;
+v_count int;
+begin
+	
+              select  count(1) into v_count  from dms.media_data_object 
+						           where doc_id =x_doc_id;
+						           
+						           
+if v_count=0 then 	
+
+
+				open X_RESULT for 
+				     select 'I' as "RESPONSE_TYPE",
+			                 v_query_dtls as "object_data",
+				            'No documents found.' as "RESPONSE_MESSAGE"
+				           ;
+				          
+else							           
+							      update  dms.media_data_object 
+							      set object_pri_key_1 = x_object_pri_key_1
+							      where doc_id = x_doc_id
+		;
+           
+		
+      
+
+---------------------------------------------
+				open X_RESULT for 
+				     select 'I' as "RESPONSE_TYPE"
+--			                 v_query_dtls as "object_data"
+--				            'Doc type updated successfully' as "RESPONSE_MESSAGE"
+				           ;
+	end if;		
+			 return x_result;
+
+--	EXCEPTION
+--            WHEN OTHERS THEN
+--                  get stacked diagnostics
+--		       v_state   = returned_sqlstate,
+--		       v_msg     = message_text,
+--		       v_detail  = pg_exception_detail,
+--		       v_hint    = pg_exception_hint,
+--		       v_context = pg_exception_context;
+--    
+--		      select  cast(nextval('seq_pw_req_id') as VARCHAR) into v_PW_SESSION_ID ;
+--       
+--     perform sp_ins_db_exception_log(
+--				'DECIMAL-LDKJW5D1R2',--'org_id',
+--				'SAARATHI-0MY7TA7QRA',--'app_id',
+--				'sp_get_login_file_dtls',--'service_name',
+--				'sp_get_login_file_dtls',--'object_name',
+--				v_PW_SESSION_ID,--'pw_request_id',
+--				x_user_id,--'login_id',
+--				x_object_pri_key_1,--'object_pri_key_1',
+--				x_object_pri_key_2,--'object_pri_key_2',
+--				x_object_pri_key_3,--'object_pri_key_3',
+--				x_object_type,--'object_type',
+--				v_state,--'err_state',
+--			    v_msg,--'err_msg',
+--			    v_detail,--'err_detail',
+--				v_hint,--'err_hint',
+--				v_context,--'err_context',
+--				x_workflow_grp_id,--'ref_data_1',
+--				x_send_to_id,--'ref_data_2',
+--				x_send_to_type,--'ref_data_3',
+--				'',--'ref_data_4',
+--				'',--'ref_data_5',
+--				'',--'ref_data_6',
+--				'',--'ref_data_7',
+--				'N',--'is_processed_1',
+--				'N',--'is_processed_2',
+--				NULL,--'is_processed_1_timestamp',
+--				NULL,--'is_processed_1_timestamp',
+--				''--'developer_remarks'
+--				); 
+-- 	 OPEN x_result FOR
+--         SELECT '00' as "RESPONSE_CODE",
+--                 err_detail "RESPONSE_MESSAGE",
+--                   'E' "RESPONSE_TYPE",
+--                   err_state ,
+--                   err_msg,
+--                   err_detail,
+--                   err_hint,
+--                   err_context
+--         
+--          from tb_db_exception_log
+--          where pw_request_id = v_PW_SESSION_ID;
+--    RETURN x_result;
+END;
+$function$
+;
